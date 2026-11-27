@@ -12,6 +12,7 @@ full a purchase has no effect, so it sells one reserve unit and carries on.
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 
 from config.board_layout import (
@@ -22,8 +23,10 @@ from config.board_layout import (
 )
 from config.target_comp import TARGET_COMP, target_rank
 from config.board_layout import SHOP_CENTERS
+from core.action_verifier import ActionStatus, ActionVerifier, Observation
 
 logger = logging.getLogger(__name__)
+VERIFY_MAX_RECHECKS = 1
 
 # Keeping the roster narrow is what makes merges reachable: every extra kind of
 # troop spreads the same elixir over more copies.
@@ -38,8 +41,13 @@ class RunState:
 
     copies: dict = field(default_factory=dict)
     purchases: list = field(default_factory=list)
+    applied_action_ids: set = field(default_factory=set)
 
-    def buy(self, name):
+    def buy(self, name, action_id=None):
+        if action_id is not None and action_id in self.applied_action_ids:
+            return self.copies.get(name, 0)
+        if action_id is not None:
+            self.applied_action_ids.add(action_id)
         self.copies[name] = self.copies.get(name, 0) + 1
         self.purchases.append(name)
         return self.copies[name]
@@ -68,11 +76,13 @@ class RunState:
 
 
 class DeployPlanner:
-    def __init__(self, reader, adb, tap_delay=0.6, diagnostics=None):
+    def __init__(self, reader, adb, tap_delay=0.6, diagnostics=None, verify_actions=False):
         self.reader = reader
         self.adb = adb
         self.tap_delay = tap_delay
         self.diagnostics = diagnostics
+        self.verify_actions = verify_actions
+        self.action_verifier = ActionVerifier()
         self._last_decision = None
 
     def choose(self, cards, elixir, state, *, action_id=None, frame_id=None,
@@ -192,33 +202,8 @@ class DeployPlanner:
                                    data={"coordinates": [list(point) for point in orbs],
                                          "count": len(orbs), "certainty": "observed",
                                          "call_source": "deploy_planner"})
-        for x, y in orbs:
-            logger.info(f"[ORB] popping quest orb at ({x}, {y})")
-            if not dry_run:
-                action_id = self.diagnostics.new_action_id() if diagnostic_enabled else None
-                if diagnostic_enabled:
-                    self.diagnostics.event("orb_tap_attempt", frame_id=frame_id, action_id=action_id,
-                                           source="DeployPlanner.play",
-                                           data={"coordinates": [x, y], "status": "attempted",
-                                                 "call_source": "deploy_planner"})
-                    try:
-                        self.adb.tap(x, y)
-                    except Exception as exc:
-                        self.diagnostics.event("adb_error", frame_id=frame_id, action_id=action_id,
-                                               source="DeployPlanner.play",
-                                               data={"operation": "orb_tap", "error_type": type(exc).__name__,
-                                                     "coordinates": [x, y], "certainty": "observed"})
-                        raise
-                else:
-                    self.adb.tap(x, y)
-                if diagnostic_enabled:
-                    self.diagnostics.event("orb_tap_returned", frame_id=frame_id, action_id=action_id,
-                                           source="DeployPlanner.play",
-                                           data={"adb_call_returned": True, "device_confirmation": "unknown"})
-                time.sleep(self.tap_delay)
-        if orbs and not dry_run:
-            screen = self._take_screenshot("after_orb_taps")
-            frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
+        # MergeTacticsBot.collect_orbs owns taps. Keeping planner detection here
+        # is useful for diagnostics, but tapping again would reuse the same frame.
 
         elixir = self._read_elixir(screen)
         elixir_certainty = "observed" if elixir is not None else "unknown"
@@ -313,6 +298,9 @@ class DeployPlanner:
                 continue
 
             elixir_before = elixir
+            before_screen = screen
+            before_frame_id = frame_id
+            verification_started = time.monotonic()
             if diagnostic_enabled:
                 copies_before = state.copies.get(choice.name, 0)
                 star_before = state.star(choice.name)
@@ -333,7 +321,8 @@ class DeployPlanner:
                                              "selection_reason": self._decision_reason(action_id),
                                              "tap_status": "attempted"})
                 try:
-                    self.adb.tap(*choice.center)
+                    adb_result = (self.adb.tap(*choice.center, timeout=5, return_result=True)
+                                  if self.verify_actions else self.adb.tap(*choice.center))
                 except Exception as exc:
                     self.diagnostics.event("adb_error", frame_id=frame_id, action_id=action_id,
                                            source="DeployPlanner.play",
@@ -345,11 +334,81 @@ class DeployPlanner:
                                        data={"adb_call_returned": True,
                                              "device_confirmation": "unknown"})
             else:
-                self.adb.tap(*choice.center)
+                adb_result = (self.adb.tap(*choice.center, timeout=5, return_result=True)
+                              if self.verify_actions else self.adb.tap(*choice.center))
             time.sleep(self.tap_delay)
+            capture_started = time.monotonic()
             screen = self._take_screenshot("after_buy", action_id)
+            capture_duration_ms = round((time.monotonic() - capture_started) * 1000)
             frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
+            recognition_started = time.monotonic()
             read = self._read_elixir(screen)
+            if self.verify_actions:
+                after_cards = self.reader.shop_cards(screen) if screen is not None else []
+                before_observation = Observation(
+                    phase=self.reader.phase(before_screen), elixir=elixir_before,
+                    shop_cards=self._shop_signature(cards), selected_slot=self._slot_index(choice),
+                )
+                after_observation = Observation(
+                    phase=self.reader.phase(screen) if screen is not None else None,
+                    elixir=read, shop_cards=self._shop_signature(after_cards),
+                    selected_slot=self._slot_index(choice) if any(
+                        self._slot_index(card) == self._slot_index(choice) for card in after_cards
+                    ) else None,
+                )
+                result = self.action_verifier.verify_purchase(
+                    action_id=action_id or f"local-{uuid.uuid4().hex}",
+                    adb_status=getattr(adb_result, "status", "succeeded"),
+                    frame_before=before_frame_id, frame_after=frame_id,
+                    before=before_observation, after=after_observation, cost=choice.cost,
+                    started_at=verification_started,
+                )
+                recognition_duration_ms = round((time.monotonic() - recognition_started) * 1000)
+                if result.status is ActionStatus.UNKNOWN:
+                    for recheck in range(VERIFY_MAX_RECHECKS):
+                        recheck_capture_started = time.monotonic()
+                        screen = self._take_screenshot("verification_recheck", action_id)
+                        capture_duration_ms += round((time.monotonic() - recheck_capture_started) * 1000)
+                        frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
+                        recheck_recognition_started = time.monotonic()
+                        read = self._read_elixir(screen)
+                        after_cards = self.reader.shop_cards(screen) if screen is not None else []
+                        after_observation = Observation(
+                            phase=self.reader.phase(screen) if screen is not None else None,
+                            elixir=read, shop_cards=self._shop_signature(after_cards),
+                            selected_slot=self._slot_index(choice) if any(
+                                self._slot_index(card) == self._slot_index(choice) for card in after_cards
+                            ) else None,
+                        )
+                        recognition_duration_ms += round(
+                            (time.monotonic() - recheck_recognition_started) * 1000
+                        )
+                        result = self.action_verifier.verify_purchase(
+                            action_id=result.action_id, adb_status=result.adb_status,
+                            frame_before=before_frame_id, frame_after=frame_id,
+                            before=before_observation, after=after_observation, cost=choice.cost,
+                            started_at=verification_started, rechecks=recheck + 1,
+                        )
+                        if result.status is not ActionStatus.UNKNOWN:
+                            break
+                if diagnostic_enabled:
+                    self.diagnostics.event(
+                        "action_verification_result", frame_id=frame_id, action_id=action_id,
+                        source="DeployPlanner.play", data={
+                            **result.as_dict(),
+                            "adb_command_duration_ms": getattr(adb_result, "duration_ms", None),
+                            "frame_capture_duration_ms": capture_duration_ms,
+                            "recognition_duration_ms": recognition_duration_ms,
+                        },
+                    )
+                if result.status is not ActionStatus.CONFIRMED:
+                    reason = "verification_" + result.status.value.lower()
+                    break
+                state.buy(choice.name, action_id=result.action_id)
+                bought.append(choice.name)
+                elixir = read
+                elixir_certainty = "observed"
+                continue
             # A successful buy spends elixir and takes the card off the shelf, so
             # only treat it as "bench full" when the balance did not drop AND the
             # same card is still on offer.
@@ -425,10 +484,11 @@ class DeployPlanner:
         return bool(self.diagnostics and self.diagnostics.enabled)
 
     def _take_screenshot(self, reason, action_id=None):
+        capture = (lambda: self.adb.screenshot(timeout=5)) if self.verify_actions else self.adb.screenshot
         if not self._diagnostics_enabled():
-            return self.adb.screenshot()
+            return capture()
         try:
-            shot = self.adb.screenshot()
+            shot = capture()
         except Exception as exc:
             self.diagnostics.event("screenshot_error", action_id=action_id,
                                    source="DeployPlanner.play",
@@ -502,6 +562,9 @@ class DeployPlanner:
             return SHOP_CENTERS.index(tuple(card.center))
         except (AttributeError, TypeError, ValueError):
             return None
+
+    def _shop_signature(self, cards):
+        return tuple((self._slot_index(card), card.name, card.cost) for card in cards)
 
     def _decision_reason(self, action_id):
         if self._last_decision and self._last_decision[0] == action_id:

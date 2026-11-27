@@ -122,6 +122,15 @@ class RunStateTests(unittest.TestCase):
         self.assertEqual(state.copies, {"knight": 1})
         self.assertEqual(state.purchases, ["knight"])
 
+    def test_same_confirmed_action_id_updates_run_state_once(self):
+        state = RunState()
+
+        state.buy("knight", action_id="action-1")
+        state.buy("knight", action_id="action-1")
+
+        self.assertEqual(state.copies, {"knight": 1})
+        self.assertEqual(state.purchases, ["knight"])
+
     def test_repeated_and_distinct_buys_are_counted(self):
         state = RunState()
         state.buy("knight")
@@ -173,7 +182,7 @@ class DeployPlannerExecutionTests(unittest.TestCase):
         def tap(self, x, y):
             self.taps.append((x, y))
 
-        def screenshot(self):
+        def screenshot(self, timeout=None):
             self.screenshots += 1
             return self.frames.pop(0) if self.frames else object()
 
@@ -268,6 +277,48 @@ class DeployPlannerExecutionTests(unittest.TestCase):
         self.assertTrue(all(force for _screen, force in ip.elixir_reads))
 
     @patch("core.strategy.time.sleep")
+    def test_verify_mode_requires_balance_and_shop_change_and_updates_once(self, _sleep):
+        from core.adb_controller import ADBActionResult
+
+        initial, updated = object(), object()
+        planner, reader, _adb, _ip = self.planner(
+            frames=[updated], elixir_by_frame={initial: 3, updated: 1},
+            cards_by_frame={initial: [card("knight", 2)], updated: [card("archer", 1)]},
+        )
+        reader.phase = lambda _frame: "deploy"
+        planner.verify_actions = True
+        planner.adb.tap = lambda *args, **_kwargs: ADBActionResult("succeeded", 0, 1)
+        state = RunState()
+
+        result = planner.play(initial, state)
+
+        self.assertEqual(result["bought"], ["knight"])
+        self.assertEqual(state.copies, {"knight": 1})
+
+    @patch("core.strategy.time.sleep")
+    def test_verify_mode_unknown_result_does_not_buy_or_sell(self, _sleep):
+        from core.adb_controller import ADBActionResult
+
+        initial, updated = object(), object()
+        planner, reader, adb, _ip = self.planner(
+            frames=[updated], elixir_by_frame={initial: 3, updated: None},
+            cards_by_frame={initial: [card("knight", 2)], updated: [card("knight", 2)]},
+        )
+        reader.phase = lambda _frame: "deploy"
+        planner.verify_actions = True
+        planner.adb.tap = lambda *args, **_kwargs: (
+            adb.taps.append(args) or ADBActionResult("succeeded", 0, 1)
+        )
+        state = RunState()
+
+        result = planner.play(initial, state)
+
+        self.assertEqual(result["bought"], [])
+        self.assertEqual(state.copies, {})
+        self.assertEqual(adb.taps, [(100, 100)])
+        self.assertEqual(adb.screenshots, 2)
+
+    @patch("core.strategy.time.sleep")
     def test_failed_buy_attempts_to_sell_a_bench_unit(self, _sleep):
         planner, reader, adb, _ip = self.planner(
             frames=["initial"],
@@ -321,7 +372,7 @@ class BotLoopTests(unittest.TestCase):
         bot.game_logic.reader.orbs.return_value = []
         bot._deploy_played = False
         bot.handle_end_screen = Mock(return_value=False)
-        bot.collect_orbs = Mock()
+        bot.collect_orbs = Mock(return_value=None)
         bot.handle_deploy_phase = Mock(return_value={"elixir": 4, "reason": "done"})
 
         def stop_after_battle_wait(delay):

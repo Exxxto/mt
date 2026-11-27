@@ -106,6 +106,8 @@ class DiagnosticsSession:
             "matches_detected": 0,
             "deploy_phases": 0,
             "battle_phases": 0,
+            "phase_observations": 0,
+            "phase_transitions": 0,
             "decisions": 0,
             "decision_duration_ms_total": 0,
             "buy_attempts": 0,
@@ -116,6 +118,10 @@ class DiagnosticsSession:
             "sale_button_taps": 0,
             "calculated_upgrades": 0,
             "orb_taps": 0,
+            "confirmed_actions": 0,
+            "failed_actions": 0,
+            "unknown_actions": 0,
+            "interrupted_actions": 0,
             "elixir_errors": 0,
             "no_card_observations": 0,
         })
@@ -210,6 +216,10 @@ class DiagnosticsSession:
             previous = self._phase
             if phase == "deploy" and previous == "battle" and self._match_id is not None:
                 self._round_index = (self._round_index or 1) + 1
+            if phase in ("deploy", "battle"):
+                self._counters["phase_observations"] += 1
+                if phase != previous:
+                    self._counters["phase_transitions"] += 1
             round_index = self._round_index
             match_id = self._match_id
         if phase in ("deploy", "battle"):
@@ -221,7 +231,7 @@ class DiagnosticsSession:
         else:
             self.event("phase_unknown", frame_id=frame_id, match_id=match_id,
                        round_index=round_index, phase=None, source="BoardReader.phase",
-                       data={"phase": None, "certainty": "unknown"})
+                       data={"phase": None, "certainty": "unknown"}, inherit_context=False)
 
     def frame_id(self, frame):
         if frame is None:
@@ -549,6 +559,12 @@ class DiagnosticsSession:
             self._counters["calculated_upgrades"] += 1
         elif event_type == "orb_tap_attempt":
             self._counters["orb_taps"] += 1
+        elif event_type == "action_verification_result":
+            status = data.get("status")
+            counter = {"CONFIRMED": "confirmed_actions", "FAILED": "failed_actions",
+                       "UNKNOWN": "unknown_actions", "INTERRUPTED": "interrupted_actions"}.get(status)
+            if counter:
+                self._counters[counter] += 1
         elif event_type == "purchase_refused":
             if data.get("reason") == "unknown_elixir":
                 self._counters["elixir_errors"] += 1

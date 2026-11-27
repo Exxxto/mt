@@ -62,7 +62,7 @@ def _git_revision():
 
 def _diagnostics_metadata(args):
     return {
-        "strategy": "legacy",
+        "strategy": "verify_actions" if getattr(args, "verify_actions", False) else "legacy",
         "git_revision": _git_revision(),
         "runtime": {
             "python": platform.python_version(),
@@ -76,6 +76,7 @@ def _diagnostics_metadata(args):
             "auto_search": not args.no_search,
             "duration_seconds": args.duration,
             "diagnostics_max_mb": args.diagnostics_max_mb,
+            "verify_actions": getattr(args, "verify_actions", False),
         },
     }
 
@@ -86,12 +87,12 @@ def diagnostics_enabled(bot):
 
 
 class MergeTacticsBot:
-    def __init__(self, diagnostics=None):
+    def __init__(self, diagnostics=None, verify_actions=False):
         self.diagnostics = diagnostics
         self.adb = ADBController(ADB_PATH)
         self.image_processor = ImageProcessor()
-        self.game_logic = (GameLogic(self.adb, self.image_processor, diagnostics=diagnostics)
-                           if diagnostics is not None else GameLogic(self.adb, self.image_processor))
+        self.game_logic = GameLogic(self.adb, self.image_processor, diagnostics=diagnostics,
+                                    verify_actions=verify_actions)
         self.last_elixir_value = 0
         self._deploy_played = False
         self._last_deploy_ts = 0.0
@@ -187,7 +188,7 @@ class MergeTacticsBot:
             else:
                 self.game_logic.start_run()
         elif diagnostics_enabled(self):
-            self.diagnostics.consume_pending_first_deploy_boundary()
+            self.game_logic.consume_pending_first_deploy_boundary()
         self._last_deploy_ts = now
 
         summary = self.game_logic.deploy_phase(screen)
@@ -204,6 +205,7 @@ class MergeTacticsBot:
                                    data={"coordinates": [list(point) for point in orbs],
                                          "count": len(orbs), "certainty": "observed",
                                          "call_source": "main_loop"})
+        tapped = False
         for x, y in orbs:
             logger.info(f"[ORB] collect at ({x}, {y})")
             action_id = None
@@ -229,6 +231,13 @@ class MergeTacticsBot:
                                        source="MergeTacticsBot.collect_orbs",
                                        data={"adb_call_returned": True, "device_confirmation": "unknown"})
             time.sleep(0.15)
+            tapped = True
+        if tapped:
+            fresh = self.adb.screenshot()
+            if diagnostics_enabled(self):
+                self.diagnostics.record_frame(fresh, reason="after_orb_taps")
+            return fresh
+        return screen
 
     def run(self, auto_search=True, duration=None):
         deadline = time.time() + duration if duration else None
@@ -267,7 +276,12 @@ class MergeTacticsBot:
             # Orbs give money and can show up in any colour during deploy and
             # battle, so grab any on screen every frame.
             if phase in ("deploy", "battle"):
-                self.collect_orbs(screen)
+                refreshed = self.collect_orbs(screen)
+                if refreshed is not None:
+                    screen = refreshed
+                    phase = self.game_logic.phase(screen)
+                    if diagnostics_enabled(self):
+                        self.diagnostics.observe_phase(phase, frame_id=self.diagnostics.frame_id(screen))
             if phase == "deploy":
                 if not self._deploy_played:
                     summary = self.handle_deploy_phase(screen)
@@ -303,10 +317,12 @@ def main():
                         help="root directory for diagnostic sessions (default: recordings)")
     parser.add_argument("--diagnostics-max-mb", type=positive_int, default=512,
                         help="maximum size per diagnostics session in MiB (default: 512)")
+    parser.add_argument("--verify-actions", action="store_true",
+                        help="require visual confirmation before updating purchase state")
     args = parser.parse_args()
 
     diagnostics = None
-    if args.diagnostics or args.record_frames:
+    if args.diagnostics or args.record_frames or args.verify_actions:
         try:
             diagnostics = DiagnosticsSession.create(
                 root=args.diagnostics_dir,
@@ -319,7 +335,9 @@ def main():
 
     finish_reason = "normal"
     try:
-        bot = MergeTacticsBot(diagnostics=diagnostics) if diagnostics is not None else MergeTacticsBot()
+        bot = (MergeTacticsBot(diagnostics=diagnostics, verify_actions=True)
+               if args.verify_actions else
+               MergeTacticsBot(diagnostics=diagnostics) if diagnostics is not None else MergeTacticsBot())
         bot.run(auto_search=not args.no_search, duration=args.duration)
     except KeyboardInterrupt:
         finish_reason = "keyboard_interrupt"

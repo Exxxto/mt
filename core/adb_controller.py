@@ -10,8 +10,17 @@ import uuid
 import cv2
 import numpy as np
 import logging
+import time
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ADBActionResult:
+    status: str
+    return_code: int | None
+    duration_ms: int
 
 
 class ADBController:
@@ -66,16 +75,17 @@ class ADBController:
             cmd += ["-s", self.serial]
         return cmd + list(args)
 
-    def screenshot(self):
+    def screenshot(self, timeout=None):
         """Take a screenshot using ADB"""
         if self.screenshot_mode == "pull":
-            return self._screenshot_pull()
+            return self._screenshot_pull(timeout=timeout or 20)
 
         try:
             result = subprocess.run(
                 self._adb_cmd("exec-out", "screencap", "-p"),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                timeout=timeout,
             )
         except Exception as e:
             logger.error(f"Screenshot failed: {e}")
@@ -92,17 +102,17 @@ class ADBController:
             raise RuntimeError("Screenshot failed: could not decode image")
         return img
 
-    def _screenshot_pull(self):
+    def _screenshot_pull(self, timeout=20):
         """Capture to a unique device file, pull it locally, and decode the PNG."""
         remote_path = f"/data/local/tmp/merge-tactics-{uuid.uuid4().hex}.png"
         try:
             with tempfile.TemporaryDirectory(prefix="merge-tactics-") as temp_dir:
                 local_path = os.path.join(temp_dir, "screenshot.png")
                 self._run_adb_checked(
-                    self._adb_cmd("shell", "screencap", "-p", remote_path), "screencap", timeout=20
+                    self._adb_cmd("shell", "screencap", "-p", remote_path), "screencap", timeout=timeout
                 )
                 self._run_adb_checked(
-                    self._adb_cmd("pull", remote_path, local_path), "pull", timeout=20
+                    self._adb_cmd("pull", remote_path, local_path), "pull", timeout=timeout
                 )
                 try:
                     with open(local_path, "rb") as screenshot_file:
@@ -142,10 +152,30 @@ class ADBController:
             raise RuntimeError(f"ADB {operation} failed: {error}")
         return result
 
-    def tap(self, x, y):
+    def tap(self, x, y, *, timeout=None, return_result=False):
         """Perform a tap at coordinates (x, y)"""
+        started = time.monotonic()
         try:
-            subprocess.run(self._adb_cmd("shell", "input", "tap", str(x), str(y)))
+            result = subprocess.run(
+                self._adb_cmd("shell", "input", "tap", str(x), str(y)),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+            )
+            message = (result.stdout + result.stderr).decode(errors="replace").lower()
+            status = "succeeded" if result.returncode == 0 else (
+                "device_lost" if any(word in message for word in ("device not found", "device offline", "no devices"))
+                else "nonzero_exit"
+            )
+            outcome = ADBActionResult(status, result.returncode,
+                                      max(0, round((time.monotonic() - started) * 1000)))
+            return outcome if return_result else None
+        except subprocess.TimeoutExpired:
+            if return_result:
+                return ADBActionResult("timeout", None,
+                                       max(0, round((time.monotonic() - started) * 1000)))
+            raise
         except Exception as e:
             logger.error(f"Tap failed at ({x}, {y}): {e}")
+            if return_result:
+                return ADBActionResult("exception", None,
+                                       max(0, round((time.monotonic() - started) * 1000)))
             raise

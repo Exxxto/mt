@@ -61,6 +61,8 @@ def analyze_session(path, verbose=False):
     unknowns = 0
     repeated_frames = 0
     purchases = []
+    verified_actions = Counter()
+    legacy_purchases = 0
     sales = []
     upgrades = 0
     for event in events:
@@ -89,8 +91,12 @@ def analyze_session(path, verbose=False):
             repeated_frames += 1
         if kind in ("buy_outcome", "buy_simulated"):
             purchases.append((kind, data))
+            if kind == "buy_outcome" and data.get("legacy_classification"):
+                legacy_purchases += 1
             if data.get("confirmation"):
                 purchase_confirmations[str(data["confirmation"])] += 1
+        if kind == "action_verification_result":
+            verified_actions[str(data.get("status", "UNKNOWN"))] += 1
         if kind.startswith("sale_"):
             sales.append((kind, data))
         if kind == "calculated_upgrade" and data.get("threshold_reached"):
@@ -130,6 +136,15 @@ def analyze_session(path, verbose=False):
         lines.append("Уверенность исходов покупки: " + ", ".join(
             f"{key}={value}" for key, value in sorted(purchase_confirmations.items())))
     lines.append(f"Покупки: {len(purchases)} событий исхода; повышения порога (расчёт): {upgrades}")
+    if verified_actions:
+        lines.append("Проверенные действия: " + ", ".join(
+            f"{key}={value}" for key, value in sorted(verified_actions.items())))
+    lines.append(f"Покупки legacy-учёта: {legacy_purchases}")
+    if summary and isinstance(summary.get("counters"), dict):
+        counters = summary["counters"]
+        if "phase_observations" in counters or "phase_transitions" in counters:
+            lines.append("Фазы: наблюдений=" + str(counters.get("phase_observations", 0))
+                         + ", переходов=" + str(counters.get("phase_transitions", 0)))
     lines.append(f"Продажа: {len(sales)} связанных событий; повторно использованных кадров: {repeated_frames}; неизвестных значений: {unknowns}")
     errors = Counter(event["event_type"] for event in events
                      if event["event_type"] in ("adb_error", "screenshot_error"))

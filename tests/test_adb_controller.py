@@ -40,6 +40,19 @@ class ADBScreenshotModeTests(unittest.TestCase):
         self.assertEqual(image.shape, (3, 4, 3))
         self.assertEqual(run.call_args.args[0], ["adb", "-s", self.serial, "exec-out", "screencap", "-p"])
 
+    def test_action_tap_reports_device_loss_and_timeout_without_raising(self):
+        import subprocess
+
+        controller = ADBController("adb", serial=self.serial)
+        with patch("core.adb_controller.subprocess.run", return_value=self.completed(
+                [], returncode=1, stderr=b"device offline")):
+            result = controller.tap(1, 2, timeout=5, return_result=True)
+        self.assertEqual(result.status, "device_lost")
+
+        with patch("core.adb_controller.subprocess.run", side_effect=subprocess.TimeoutExpired([], 5)):
+            result = controller.tap(1, 2, timeout=5, return_result=True)
+        self.assertEqual(result.status, "timeout")
+
     def test_invalid_mode_is_rejected_before_adb_access(self):
         with patch.dict(os.environ, {"ADB_SCREENSHOT_MODE": "unknown"}, clear=True):
             with patch("core.adb_controller.subprocess.run") as run:

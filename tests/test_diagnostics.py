@@ -293,6 +293,23 @@ class DiagnosticsSessionTests(unittest.TestCase):
         self.assertFalse(boundaries[1]["data"]["deduplicated"])
         self.assertEqual(boundaries[1]["round_index"], 1)
 
+    def test_unknown_phase_keeps_last_stable_phase_for_round_count(self):
+        with tempfile.TemporaryDirectory() as temp:
+            diag = DiagnosticsSession.create(temp, {})
+            diag.new_match_id("search_tap")
+            diag.observe_phase("deploy", frame_id=1)
+            diag.observe_phase("battle", frame_id=2)
+            diag.observe_phase(None, frame_id=3)
+            diag.observe_phase("deploy", frame_id=4)
+            diag.close("test")
+
+            events = [json.loads(line) for line in diag.events_path.read_text(encoding="utf-8").splitlines()]
+            phases = [event for event in events if event["event_type"] == "phase"]
+            self.assertEqual([event["round_index"] for event in phases], [1, 1, 2])
+            summary = json.loads(diag.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["counters"]["phase_observations"], 3)
+            self.assertEqual(summary["counters"]["phase_transitions"], 3)
+
     def test_full_frame_queue_drops_new_frames_and_counts_them(self):
         with tempfile.TemporaryDirectory() as temp:
             entered = threading.Event()
@@ -616,9 +633,11 @@ class ActionDiagnosticsTests(unittest.TestCase):
 
             lobby_id = diag.frame_id(lobby)
             self.assertTrue(bot.search_match(lobby))
+            logic.run_state.buy("knight")
             deploy_id = diag.frame_id(deploy)
             diag.observe_phase("deploy", frame_id=deploy_id)
             logic.start_run(boundary_source="deploy_gap")
+            self.assertEqual(logic.run_state.copies, {"knight": 1})
             diag.record_frame(deploy, reason="phase_deploy")
             logic.start_run(boundary_source="deploy_gap")  # later gap is a new partial match
             diag.close("test")
@@ -626,13 +645,12 @@ class ActionDiagnosticsTests(unittest.TestCase):
             events = [json.loads(line) for line in diag.events_path.read_text(encoding="utf-8").splitlines()]
             boundaries = [event for event in events if event["event_type"] == "match_boundary_assumed"]
             deployment_phase = next(event for event in events if event["event_type"] == "phase")
-            first_deploy_boundary = boundaries[1]
             summary = json.loads(diag.summary_path.read_text(encoding="utf-8"))
             saved_ids = {int(path.stem) for path in (diag.session_dir / "frames").glob("*.png")}
-            self.assertEqual(len(boundaries), 3)
-            self.assertEqual(boundaries[0]["match_id"], boundaries[1]["match_id"])
-            self.assertTrue(first_deploy_boundary["data"]["deduplicated"])
-            self.assertEqual(first_deploy_boundary["phase"], "deploy")
+            self.assertEqual(len(boundaries), 2)
+            prevented = [event for event in events
+                         if event["event_type"] == "match_boundary_prevented_reset"]
+            self.assertEqual(len(prevented), 1)
             self.assertEqual(deployment_phase["data"]["phase"], "deploy")
             self.assertEqual(logic.run_state.copies, {})
             self.assertEqual(saved_ids, {lobby_id, deploy_id})
@@ -656,7 +674,7 @@ class ActionDiagnosticsTests(unittest.TestCase):
         self.assertEqual(boundary["match_id"], "match-001")
         self.assertFalse(boundary["data"]["deduplicated"])
 
-    def test_orb_taps_from_two_existing_paths_share_the_reused_frame(self):
+    def test_orbs_have_one_tap_owner_for_each_observed_frame(self):
         _, diag = self._session()
         screen = FakeFrame(0)
         card = ShopCard("dark_prince", 2, SHOP_CENTERS[0])
@@ -676,12 +694,12 @@ class ActionDiagnosticsTests(unittest.TestCase):
 
         events = self._events(diag)
         taps = [event for event in events if event["event_type"] == "orb_tap_attempt"]
-        self.assertEqual(len(taps), 2)
+        self.assertEqual(len(taps), 1)
         self.assertEqual({event["frame_id"] for event in taps}, {1})
         self.assertEqual({event["source"] for event in taps},
-                         {"MergeTacticsBot.collect_orbs", "DeployPlanner.play"})
+                         {"MergeTacticsBot.collect_orbs"})
         self.assertTrue(any(event["event_type"] == "frame_reused" for event in events))
-        self.assertEqual(adb.taps, [(100, 200), (100, 200)])
+        self.assertEqual(adb.taps, [(100, 200)])
         self.assertEqual(adb.screenshots, 1)
 
     def test_existing_main_loop_screenshot_error_is_structured(self):
@@ -765,15 +783,13 @@ class ActionDiagnosticsTests(unittest.TestCase):
                 raise RuntimeError(f"device '{secret}' not found")
 
         cases = (
-            ("orb_tap", lambda reader, adb, diag: DeployPlanner(reader, adb, diagnostics=diag).play(
-                FakeFrame(2), RunState())),
             ("sale_slot_tap", lambda reader, adb, diag: DeployPlanner(reader, adb, diagnostics=diag)._sell_one(
                 FakeFrame(2))),
         )
         for operation, invoke in cases:
             with self.subTest(operation=operation):
                 _, diag = self._session()
-                reader = FakeReader([], orbs=[(1, 2)]) if operation == "orb_tap" else FakeReader([])
+                reader = FakeReader([])
                 with patch("core.strategy.time.sleep"), self.assertRaisesRegex(RuntimeError, secret):
                     invoke(reader, FailingADB(), diag)
                 diag.close("test")
