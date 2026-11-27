@@ -12,12 +12,22 @@ class ActionStatus(str, Enum):
     INTERRUPTED = "INTERRUPTED"
 
 
+class VerificationBudget:
+    """One monotonic time budget shared by an action and its rechecks."""
+
+    def __init__(self, seconds):
+        self.deadline = time.monotonic() + max(0.0, float(seconds))
+
+    def remaining(self):
+        return max(0.0, self.deadline - time.monotonic())
+
+
 @dataclass(frozen=True)
 class Observation:
     phase: str | None = None
     elixir: int | None = None
-    shop_cards: tuple = ()
-    selected_slot: int | None = None
+    shop_cards: tuple | None = None
+    selected_slot: tuple | None = None
 
 
 @dataclass
@@ -52,17 +62,16 @@ class ActionVerifier:
         elapsed = max(0, round((time.monotonic() - started_at) * 1000))
         if before.phase != "deploy" or after.phase != "deploy":
             status, reason = ActionStatus.INTERRUPTED, "deploy phase changed or was not observed"
-        elif adb_status != "succeeded":
-            status, reason = ActionStatus.FAILED, f"ADB command {adb_status}"
         elif before.elixir is None or after.elixir is None:
             status, reason = ActionStatus.UNKNOWN, "elixir is not visually recognized before and after"
         else:
             delta = before.elixir - after.elixir
             elixir_matches = delta == cost
-            shop_changed = bool(before.shop_cards and after.shop_cards and
-                                before.shop_cards != after.shop_cards)
-            slot_changed = (before.selected_slot is not None and after.selected_slot is not None
-                            and before.selected_slot != after.selected_slot)
+            shop_known = before.shop_cards is not None and after.shop_cards is not None
+            shop_changed = shop_known and before.shop_cards != after.shop_cards
+            slot_known = before.selected_slot is not None and after.selected_slot is not None
+            slot_changed = slot_known and before.selected_slot[0] == after.selected_slot[0] and \
+                before.selected_slot[1] != after.selected_slot[1]
             if elixir_matches:
                 evidence.append("elixir_delta_matches_cost")
             if shop_changed:
@@ -71,7 +80,9 @@ class ActionVerifier:
                 evidence.append("selected_slot_changed")
             if elixir_matches and (shop_changed or slot_changed):
                 status, reason = ActionStatus.CONFIRMED, "elixir delta and shop selection evidence agree"
-            elif delta == 0 and not shop_changed and not slot_changed:
+            elif adb_status != "succeeded":
+                status, reason = ActionStatus.UNKNOWN, f"ADB command {adb_status}; game effect is uncertain"
+            elif delta == 0 and shop_known and not shop_changed and slot_known and not slot_changed:
                 status, reason = ActionStatus.FAILED, "no visible purchase effect"
             elif delta != cost:
                 status, reason = ActionStatus.UNKNOWN, "observed elixir delta does not match purchase cost"

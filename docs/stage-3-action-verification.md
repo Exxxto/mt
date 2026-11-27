@@ -1,56 +1,42 @@
-# Stage 3: Action verification and match state
+# Stage 3: action verification and state consistency
 
-## Architecture and classification
+## Purchase verification
 
-`core/action_verifier.py` models a visible before/after observation and returns a structured action result. It keeps ADB transport status separate from the game result. A purchase is `CONFIRMED` only when the observed elixir decrease equals the selected card cost and the shop assortment or selected slot changes. A stable balance and unchanged shop is `FAILED`; missing or conflicting observations are `UNKNOWN`; a phase outside deploy is `INTERRUPTED`. These outcomes confirm the transaction only, not the troop's location or star level.
+`core/action_verifier.py` compares visible observations from one frame before and one frame after a purchase. An observation groups phase, recognized elixir, recognized shop cards, and the contents of the selected slot. An incomplete shop is unknown; it is not evidence that the assortment changed or stayed the same. A selected-slot change requires the same recognized slot index with different recognized card contents.
 
-The `--verify-actions` flag enables the verifier and structured diagnostics. It captures an after-action frame, permits one bounded recheck without another tap, and ends the purchase chain when the result remains unknown. The new mode gives ADB tap and screenshot operations five-second timeouts. `RunState` is updated only after confirmation, and confirmed action IDs are applied once. Legacy behavior remains the default; legacy purchases continue to be labeled as legacy in recordings.
+- `CONFIRMED`: deploy continued, the visible elixir delta equals the selected card cost, and the complete shop or selected slot visibly changed.
+- `FAILED`: deploy continued, the visible balance is unchanged, and both the complete shop and selected slot are visibly unchanged.
+- `UNKNOWN`: observations are missing or conflict, or ADB failed without enough visual evidence to decide whether the tap took effect.
+- `INTERRUPTED`: the post-action observation shows deploy ended or its phase is unknown.
 
-## State and input fixes
+ADB process status and game outcome are recorded separately. A timeout or transport exception does not prove that no tap reached the game. In verify mode an unknown/interrupted result ends the current buy chain and marks `RunState.sync_required`. Later rounds cannot use that state for purchases; it is cleared only when a new match initializes a new `RunState`. Confirmed actions update the roster once by `action_id`; unknown actions do not.
 
-- `MergeTacticsBot.collect_orbs` is the sole tap owner. After any orb taps it captures a fresh frame and the main loop re-evaluates phase before making more decisions. The planner still records orb detections but does not tap them.
-- The first deploy following `search_tap` or `rematch_tap` consumes that pending boundary without clearing `RunState`; a later real boundary still creates a new run.
-- Unknown phase observations no longer overwrite the last stable phase. Round index advances on a stable `battle` to `deploy` transition, including when unknown observations occur between them. Diagnostics count phase observations and stable transitions separately.
-- Verification mode never invokes the legacy reactive sale path. Safe automatic sales remain out of scope until bench recognition exists.
+## Fresh observations and bounded work
 
-## Diagnostics and limits
+Verify mode checks phase before a tap and after every newly captured frame while waiting for elixir or shop recognition. Shop cards and elixir used in a decision come from the same frame. A shop retry that sees another phase stops without tapping.
 
-Schema version remains 1. New `action_verification_result` events include action and frame IDs, visible observations, evidence, reason, ADB status, recheck count, and total duration. The analyzer reports verified outcomes separately from legacy accounting and continues to accept old schema v1 recordings. Phase observation and transition totals are included in new summaries.
+Each purchase and its single optional recheck share an eight-second monotonic budget. Tap, screenshot capture, and deliberate delay use the remaining budget; an expired budget prevents another capture. CPU-based image recognition cannot be forcibly interrupted, so unusually slow recognition may finish after the deadline, but it cannot trigger an additional recheck after expiration. Pull-mode screenshot capture, download, and remote cleanup share the caller's timeout. Cleanup is skipped when the budget has expired.
 
-The existing diagnostics byte cap still applies to both event and frame data. When exhausted, the current recorder drops further events; this stage does not add a separate event reserve. The result duration is measured with a monotonic clock. Verification events also record ADB tap duration and aggregate frame capture and recognition duration, including a recheck when used.
+After orb taps, the bot requires a fresh screenshot before it makes another phase or purchase decision. If capture fails, the loop drops the old frame and retries from a new capture. `MergeTacticsBot.collect_orbs` remains the only component that taps orbs.
 
-The five-second bound applies to each ADB operation, and a single recheck can add another screenshot delay. End-to-end latency has not been measured on MuMuPlayer in this stage. The previous approximate 500 ms frame time suggests a recheck may be noticeable, but is not a measurement of this implementation.
+The legacy mode remains the default and retains its existing purchase accounting. Verify mode does not invoke the legacy sale fallback, so an uncertain purchase cannot trigger a sale. No board or bench recognition is added; synchronization recovery from an unknown result remains out of scope.
 
-## Verification
+## Diagnostics and compatibility
 
-The existing 81 tests plus 11 new tests pass with:
+The verifier result includes action type and ID, ADB status, frame IDs, before/after observations, evidence, reason, elapsed time, and recheck count. Existing schema version 1 recordings remain readable. The analyzer keeps verified outcomes distinct from legacy inferred purchases. The existing diagnostics storage cap still applies to both events and frames; when exhausted, recording continues to drop later data.
+
+## Run and manually inspect
+
+Run the automatic tests with:
 
 ```powershell
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The tests use fake ADB calls and synthetic observations; no live match or game tap was run. `git diff --check` is also clean.
-
-## Offline review of the supplied match
-
-The following before/after pairs were reviewed from the local PNGs. Each pair shows deploy continuing, the recorded elixir delta matching the cost, and the shop changing. This supports a transaction confirmation under the stage 3 rule; it does not prove a particular board or star result.
-
-| Action | Frames | Visible elixir | Shop evidence | Offline result |
-| --- | --- | --- | --- | --- |
-| barbarian (2) | 7 → 8 | 5 → 3 | slot assortment changed | Confirmable |
-| giant_skeleton (3) | 8 → 9 | 3 → 0 | slot assortment changed | Confirmable |
-| mini_pekka (5) | 35 → 36 | 5 → 0 | slot assortment changed | Confirmable |
-| bandit (3) | 66 → 67 | 5 → 2 | slot assortment changed | Confirmable |
-| knight (2) | 67 → 68 | 2 → 0 | slot assortment changed | Confirmable |
-
-These are offline observations of the existing recording. The new mode was not run against a live game.
-
-## Manual check
-
-Start with the game already open and use:
+For a manual check, start with the game already open:
 
 ```powershell
 .venv\Scripts\python.exe bot.py --no-search --verify-actions --record-frames
 ```
 
-Review the generated `recordings/<session>/events.jsonl` for one `buy_attempt` and one `action_verification_result` per purchase. Confirmed purchases should change inferred `RunState` once; unknown outcomes should end that phase's purchase chain. Stop with Ctrl+C. Do not use this procedure on a live match without explicitly authorizing game input.
+Inspect each `buy_attempt` alongside its `action_verification_result`. A confirmed transaction updates `RunState` once; an unknown or interrupted result ends buying and requires a new match before the state is trusted again. This procedure sends game input. No live match or game taps were used for the automated checks in this stage.

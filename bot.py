@@ -233,7 +233,17 @@ class MergeTacticsBot:
             time.sleep(0.15)
             tapped = True
         if tapped:
-            fresh = self.adb.screenshot()
+            try:
+                fresh = self.adb.screenshot()
+            except Exception as exc:
+                logger.warning("[ORB] could not refresh frame: %s", type(exc).__name__)
+                if diagnostics_enabled(self):
+                    self.diagnostics.event("screenshot_error", frame_id=frame_id,
+                                           source="MergeTacticsBot.collect_orbs",
+                                           data={"reason": "after_orb_taps",
+                                                 "error_type": type(exc).__name__,
+                                                 "certainty": "observed"})
+                return None
             if diagnostics_enabled(self):
                 self.diagnostics.record_frame(fresh, reason="after_orb_taps")
             return fresh
@@ -277,11 +287,14 @@ class MergeTacticsBot:
             # battle, so grab any on screen every frame.
             if phase in ("deploy", "battle"):
                 refreshed = self.collect_orbs(screen)
-                if refreshed is not None:
-                    screen = refreshed
-                    phase = self.game_logic.phase(screen)
-                    if diagnostics_enabled(self):
-                        self.diagnostics.observe_phase(phase, frame_id=self.diagnostics.frame_id(screen))
+                if refreshed is None:
+                    # Never make phase or purchase decisions from the pre-tap frame.
+                    time.sleep(ERROR_DELAY)
+                    continue
+                screen = refreshed
+                phase = self.game_logic.phase(screen)
+                if diagnostics_enabled(self):
+                    self.diagnostics.observe_phase(phase, frame_id=self.diagnostics.frame_id(screen))
             if phase == "deploy":
                 if not self._deploy_played:
                     summary = self.handle_deploy_phase(screen)

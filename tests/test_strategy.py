@@ -200,11 +200,12 @@ class DeployPlannerExecutionTests(unittest.TestCase):
             return self.sell_button
 
     class FakeReader:
-        def __init__(self, image_processor, cards_by_frame=None, cards=None, orbs=()):
+        def __init__(self, image_processor, cards_by_frame=None, cards=None, orbs=(), phases=None):
             self.image_processor = image_processor
             self.cards_by_frame = cards_by_frame or {}
             self.cards = cards or []
             self.orb_list = list(orbs)
+            self.phases = phases or {}
             self.shop_frames = []
 
         def orbs(self, _screen):
@@ -216,6 +217,9 @@ class DeployPlannerExecutionTests(unittest.TestCase):
         def shop_cards(self, screen):
             self.shop_frames.append(screen)
             return self.cards_by_frame.get(screen, self.cards)
+
+        def phase(self, screen):
+            return self.phases.get(screen, "deploy")
 
     def planner(self, frames=(), elixir_by_frame=None, cards=None, cards_by_frame=None,
                 orbs=(), sell_button=None):
@@ -283,7 +287,13 @@ class DeployPlannerExecutionTests(unittest.TestCase):
         initial, updated = object(), object()
         planner, reader, _adb, _ip = self.planner(
             frames=[updated], elixir_by_frame={initial: 3, updated: 1},
-            cards_by_frame={initial: [card("knight", 2)], updated: [card("archer", 1)]},
+            cards_by_frame={initial: [
+                ShopCard("knight", 2, (100, 100), slot_index=0),
+                ShopCard("goblin", 1, (200, 100), slot_index=1),
+                ShopCard("archer", 1, (300, 100), slot_index=2)], updated: [
+                ShopCard("archer", 1, (100, 100), slot_index=0),
+                ShopCard("goblin", 1, (200, 100), slot_index=1),
+                ShopCard("knight", 2, (300, 100), slot_index=2)]},
         )
         reader.phase = lambda _frame: "deploy"
         planner.verify_actions = True
@@ -317,6 +327,140 @@ class DeployPlannerExecutionTests(unittest.TestCase):
         self.assertEqual(state.copies, {})
         self.assertEqual(adb.taps, [(100, 100)])
         self.assertEqual(adb.screenshots, 2)
+        self.assertTrue(state.sync_required)
+
+    @patch("core.strategy.time.sleep")
+    def test_verify_mode_phase_change_after_tap_marks_state_unsynced(self, _sleep):
+        from core.adb_controller import ADBActionResult
+
+        initial, after = object(), object()
+        planner, reader, adb, _ip = self.planner(
+            frames=[after], elixir_by_frame={initial: 3, after: 1},
+            cards_by_frame={initial: [card("knight", 2)], after: [card("archer", 1)]},
+        )
+        reader.phase = lambda frame: "battle" if frame is after else "deploy"
+        planner.verify_actions = True
+        planner.adb.tap = lambda *args, **kwargs: (
+            adb.taps.append(args) or ADBActionResult("succeeded", 0, 1)
+        )
+        state = RunState()
+
+        result = planner.play(initial, state)
+
+        self.assertEqual(result["reason"], "verification_interrupted")
+        self.assertEqual(state.copies, {})
+        self.assertTrue(state.sync_required)
+        self.assertEqual(adb.taps, [(100, 100)])
+
+    @patch("core.strategy.time.sleep")
+    def test_verify_mode_adb_exception_is_unknown_without_repeat_or_sale(self, _sleep):
+        initial, after = object(), object()
+        planner, _reader, adb, _ip = self.planner(
+            frames=[after, object()], elixir_by_frame={initial: 3, after: 3},
+            cards_by_frame={initial: [card("knight", 2)], after: [card("knight", 2)]},
+        )
+        planner.verify_actions = True
+        def fail_tap(*args, **kwargs):
+            adb.taps.append(args)
+            raise OSError("transport disappeared")
+        planner.adb.tap = fail_tap
+        state = RunState()
+
+        result = planner.play(initial, state)
+
+        self.assertEqual(result["reason"], "verification_unknown")
+        self.assertEqual(state.copies, {})
+        self.assertTrue(state.sync_required)
+        self.assertEqual(adb.taps, [(100, 100)])
+
+    @patch("core.strategy.time.sleep")
+    def test_verify_mode_refuses_unknown_phase_before_tapping(self, _sleep):
+        initial = object()
+        planner, reader, adb, _ip = self.planner(
+            elixir_by_frame={initial: 4}, cards=[card("knight", 2)]
+        )
+        reader.phase = lambda _frame: None
+        planner.verify_actions = True
+
+        result = planner.play(initial, RunState())
+
+        self.assertEqual(result["bought"], [])
+        self.assertEqual(adb.taps, [])
+
+    @patch("core.strategy.time.sleep")
+    def test_shop_retry_stops_if_deploy_phase_ends(self, _sleep):
+        initial, battle = object(), object()
+        planner, reader, adb, _ip = self.planner(
+            frames=[battle], elixir_by_frame={initial: 3, battle: 3},
+            cards_by_frame={initial: [], battle: [card("knight", 2)]},
+        )
+        reader.phase = lambda frame: "battle" if frame is battle else "deploy"
+        planner.verify_actions = True
+
+        result = planner.play(initial, RunState())
+
+        self.assertEqual(result["bought"], [])
+        self.assertEqual(adb.taps, [])
+        self.assertEqual(result["reason"], "phase_ended")
+
+    @patch("core.strategy.time.sleep")
+    def test_shop_retry_replaces_balance_with_value_from_same_fresh_frame(self, _sleep):
+        from core.adb_controller import ADBActionResult
+
+        initial, retry, after = object(), object(), object()
+        selected = ShopCard("knight", 2, (100, 100), slot_index=0)
+        replacement = ShopCard("archer", 2, (100, 100), slot_index=0)
+        planner, reader, adb, _ip = self.planner(
+            frames=[retry, after], elixir_by_frame={initial: 1, retry: 3, after: 1},
+            cards_by_frame={initial: [], retry: [selected], after: [replacement]},
+        )
+        reader.phase = lambda _frame: "deploy"
+        planner.verify_actions = True
+        planner.adb.tap = lambda *args, **kwargs: (
+            adb.taps.append(args) or ADBActionResult("succeeded", 0, 1)
+        )
+
+        result = planner.play(initial, RunState())
+
+        self.assertEqual(result["bought"], ["knight"])
+        self.assertEqual(adb.taps, [(100, 100)])
+
+    @patch("core.strategy.time.sleep")
+    def test_missing_post_purchase_shop_stays_unknown_and_marks_state_unsynced(self, _sleep):
+        from core.adb_controller import ADBActionResult
+
+        initial, after, recheck = object(), object(), object()
+        selected = ShopCard("knight", 2, (100, 100), slot_index=0)
+        planner, reader, adb, _ip = self.planner(
+            frames=[after, recheck], elixir_by_frame={initial: 3, after: 1, recheck: 1},
+            cards_by_frame={initial: [selected], after: [], recheck: []},
+        )
+        reader.phase = lambda _frame: "deploy"
+        planner.verify_actions = True
+        planner.adb.tap = lambda *args, **kwargs: (
+            adb.taps.append(args) or ADBActionResult("succeeded", 0, 1)
+        )
+        state = RunState()
+
+        result = planner.play(initial, state)
+
+        self.assertEqual(result["bought"], [])
+        self.assertTrue(state.sync_required)
+        self.assertEqual(adb.taps, [(100, 100)])
+
+    @patch("core.strategy.time.sleep")
+    def test_unsynced_state_blocks_purchases_on_later_round(self, _sleep):
+        initial = object()
+        planner, _reader, adb, _ip = self.planner(
+            elixir_by_frame={initial: 5}, cards=[card("knight", 2)]
+        )
+        planner.verify_actions = True
+        state = RunState(sync_required=True)
+
+        result = planner.play(initial, state)
+
+        self.assertEqual(result["reason"], "state_sync_required")
+        self.assertEqual(adb.taps, [])
 
     @patch("core.strategy.time.sleep")
     def test_failed_buy_attempts_to_sell_a_bench_unit(self, _sleep):
@@ -362,17 +506,49 @@ class BotLoopTests(unittest.TestCase):
     class StopLoop(BaseException):
         pass
 
+    def test_orb_refresh_failure_returns_no_frame(self):
+        bot = MergeTacticsBot.__new__(MergeTacticsBot)
+        bot.adb = Mock()
+        bot.adb.screenshot.side_effect = OSError("device offline")
+        bot.game_logic = Mock()
+        bot.game_logic.reader.orbs.return_value = [(10, 20)]
+        bot.diagnostics = None
+
+        result = bot.collect_orbs("source-frame")
+
+        self.assertIsNone(result)
+        bot.adb.tap.assert_called_once_with(10, 20)
+
+    def test_loop_drops_old_frame_after_orb_refresh_failure(self):
+        bot = MergeTacticsBot.__new__(MergeTacticsBot)
+        bot.adb = Mock()
+        bot.adb.screenshot.return_value = "old-frame"
+        bot.image_processor = Mock()
+        bot.game_logic = Mock()
+        bot.game_logic.phase.return_value = "deploy"
+        bot._deploy_played = False
+        bot.handle_end_screen = Mock(return_value=False)
+        bot.collect_orbs = Mock(return_value=None)
+        bot.handle_deploy_phase = Mock()
+
+        with patch("bot.time.sleep", side_effect=self.StopLoop):
+            with self.assertRaises(self.StopLoop):
+                bot.run(auto_search=False)
+
+        bot.game_logic.phase.assert_called_once_with("old-frame")
+        bot.handle_deploy_phase.assert_not_called()
+
     def test_deploy_and_battle_frames_follow_the_existing_branches(self):
         bot = MergeTacticsBot.__new__(MergeTacticsBot)
         bot.adb = Mock()
         bot.adb.screenshot.side_effect = ["deploy-frame", "battle-frame", self.StopLoop()]
         bot.image_processor = Mock()
         bot.game_logic = Mock()
-        bot.game_logic.phase.side_effect = ["deploy", "battle"]
+        bot.game_logic.phase.side_effect = ["deploy", "deploy", "battle", "battle"]
         bot.game_logic.reader.orbs.return_value = []
         bot._deploy_played = False
         bot.handle_end_screen = Mock(return_value=False)
-        bot.collect_orbs = Mock(return_value=None)
+        bot.collect_orbs = Mock(side_effect=["deploy-frame", "battle-frame"])
         bot.handle_deploy_phase = Mock(return_value={"elixir": 4, "reason": "done"})
 
         def stop_after_battle_wait(delay):
@@ -384,8 +560,8 @@ class BotLoopTests(unittest.TestCase):
                 bot.run(auto_search=False)
 
         self.assertEqual(bot.game_logic.phase.call_args_list, [
-            unittest.mock.call("deploy-frame"),
-            unittest.mock.call("battle-frame"),
+            unittest.mock.call("deploy-frame"), unittest.mock.call("deploy-frame"),
+            unittest.mock.call("battle-frame"), unittest.mock.call("battle-frame"),
         ])
         bot.handle_deploy_phase.assert_called_once_with("deploy-frame")
         self.assertEqual(bot.collect_orbs.call_count, 2)

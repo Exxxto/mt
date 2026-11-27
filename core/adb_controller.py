@@ -78,7 +78,7 @@ class ADBController:
     def screenshot(self, timeout=None):
         """Take a screenshot using ADB"""
         if self.screenshot_mode == "pull":
-            return self._screenshot_pull(timeout=timeout or 20)
+            return self._screenshot_pull(timeout=20 if timeout is None else timeout)
 
         try:
             result = subprocess.run(
@@ -105,14 +105,22 @@ class ADBController:
     def _screenshot_pull(self, timeout=20):
         """Capture to a unique device file, pull it locally, and decode the PNG."""
         remote_path = f"/data/local/tmp/merge-tactics-{uuid.uuid4().hex}.png"
+        deadline = time.monotonic() + max(0.0, timeout)
+
+        def remaining():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise subprocess.TimeoutExpired("adb screenshot", timeout)
+            return left
+
         try:
             with tempfile.TemporaryDirectory(prefix="merge-tactics-") as temp_dir:
                 local_path = os.path.join(temp_dir, "screenshot.png")
                 self._run_adb_checked(
-                    self._adb_cmd("shell", "screencap", "-p", remote_path), "screencap", timeout=timeout
+                    self._adb_cmd("shell", "screencap", "-p", remote_path), "screencap", timeout=remaining()
                 )
                 self._run_adb_checked(
-                    self._adb_cmd("pull", remote_path, local_path), "pull", timeout=timeout
+                    self._adb_cmd("pull", remote_path, local_path), "pull", timeout=remaining()
                 )
                 try:
                     with open(local_path, "rb") as screenshot_file:
@@ -128,14 +136,16 @@ class ADBController:
                 return image
         finally:
             try:
-                result = subprocess.run(
-                    self._adb_cmd("shell", "rm", "-f", remote_path),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=5,
-                )
-                if result.returncode != 0:
-                    logger.warning("Could not remove temporary ADB screenshot")
+                cleanup_timeout = deadline - time.monotonic()
+                if cleanup_timeout > 0:
+                    result = subprocess.run(
+                        self._adb_cmd("shell", "rm", "-f", remote_path),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=cleanup_timeout,
+                    )
+                    if result.returncode != 0:
+                        logger.warning("Could not remove temporary ADB screenshot")
             except Exception as error:
                 logger.warning("Could not remove temporary ADB screenshot: %s", type(error).__name__)
 

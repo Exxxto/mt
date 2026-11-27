@@ -23,10 +23,12 @@ from config.board_layout import (
 )
 from config.target_comp import TARGET_COMP, target_rank
 from config.board_layout import SHOP_CENTERS
-from core.action_verifier import ActionStatus, ActionVerifier, Observation
+from core.action_verifier import ActionStatus, ActionVerifier, Observation, VerificationBudget
+from core.adb_controller import ADBActionResult
 
 logger = logging.getLogger(__name__)
 VERIFY_MAX_RECHECKS = 1
+VERIFY_ACTION_TIMEOUT_SECONDS = 8.0
 
 # Keeping the roster narrow is what makes merges reachable: every extra kind of
 # troop spreads the same elixir over more copies.
@@ -42,6 +44,7 @@ class RunState:
     copies: dict = field(default_factory=dict)
     purchases: list = field(default_factory=list)
     applied_action_ids: set = field(default_factory=set)
+    sync_required: bool = False
 
     def buy(self, name, action_id=None):
         if action_id is not None and action_id in self.applied_action_ids:
@@ -193,6 +196,9 @@ class DeployPlanner:
 
     def play(self, screen, state, max_buys=6, dry_run=False):
         """Play one deploy phase: pop the orbs, then spend the elixir"""
+        if self.verify_actions and state.sync_required:
+            return {"elixir": None, "bought": [], "orbs": 0, "units": 0,
+                    "units_before": 0, "roster": state.report(), "reason": "state_sync_required"}
         diagnostic_enabled = bool(self.diagnostics and self.diagnostics.enabled)
         frame_id = self.diagnostics.record_frame(screen, reason="deploy_phase_input") if diagnostic_enabled else None
         orbs = self.reader.orbs(screen)
@@ -207,6 +213,9 @@ class DeployPlanner:
 
         elixir = self._read_elixir(screen)
         elixir_certainty = "observed" if elixir is not None else "unknown"
+        if self.verify_actions and (screen is None or self.reader.phase(screen) != "deploy"):
+            return {"elixir": elixir, "bought": [], "orbs": len(orbs), "units": 0,
+                    "units_before": 0, "roster": state.report(), "reason": "phase_unknown"}
         if elixir is None and not dry_run:
             # A round opens with a modal notification that covers the elixir
             # badge and the shop for a few seconds, so poll until it clears.
@@ -216,6 +225,9 @@ class DeployPlanner:
                 if fresh is not None:
                     screen = fresh
                     frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
+                    if self.verify_actions and self.reader.phase(screen) != "deploy":
+                        return {"elixir": None, "bought": [], "orbs": len(orbs), "units": 0,
+                                "units_before": 0, "roster": state.report(), "reason": "phase_ended"}
                     elixir = self._read_elixir(screen)
                     if elixir is not None:
                         elixir_certainty = "observed"
@@ -249,10 +261,23 @@ class DeployPlanner:
                 for _ in range(5):
                     time.sleep(0.6)
                     screen = self._take_screenshot("shop_recognition_retry")
+                    if screen is None:
+                        continue
                     frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
+                    if self.verify_actions and self.reader.phase(screen) != "deploy":
+                        reason = "phase_ended"
+                        break
+                    if self.verify_actions:
+                        elixir = self._read_elixir(screen)
+                        elixir_certainty = "observed" if elixir is not None else "unknown"
                     cards = self.reader.shop_cards(screen)
                     if cards:
                         break
+                if reason == "phase_ended":
+                    break
+                if self.verify_actions and elixir is None:
+                    reason = "no_elixir"
+                    break
             if not cards:
                 # Could not see the shop at all. Do not treat this as a decision:
                 # the caller retries on a later frame of the same deploy phase.
@@ -280,6 +305,10 @@ class DeployPlanner:
                 )
                 break
 
+            if self.verify_actions and self.reader.phase(screen) != "deploy":
+                reason = "phase_ended"
+                break
+
             logger.info(f"[BUY] {choice.name} ({choice.cost}) -> {state.star(choice.name)}*")
             if dry_run:
                 if diagnostic_enabled:
@@ -300,6 +329,7 @@ class DeployPlanner:
             elixir_before = elixir
             before_screen = screen
             before_frame_id = frame_id
+            budget = VerificationBudget(VERIFY_ACTION_TIMEOUT_SECONDS) if self.verify_actions else None
             verification_started = time.monotonic()
             if diagnostic_enabled:
                 copies_before = state.copies.get(choice.name, 0)
@@ -321,40 +351,53 @@ class DeployPlanner:
                                              "selection_reason": self._decision_reason(action_id),
                                              "tap_status": "attempted"})
                 try:
-                    adb_result = (self.adb.tap(*choice.center, timeout=5, return_result=True)
+                    adb_result = (self.adb.tap(*choice.center, timeout=budget.remaining(), return_result=True)
                                   if self.verify_actions else self.adb.tap(*choice.center))
                 except Exception as exc:
                     self.diagnostics.event("adb_error", frame_id=frame_id, action_id=action_id,
                                            source="DeployPlanner.play",
-                    data={"operation": "buy_tap", "error_type": type(exc).__name__,
+                                           data={"operation": "buy_tap", "error_type": type(exc).__name__,
                                                  "certainty": "observed"})
-                    raise
+                    if not self.verify_actions:
+                        raise
+                    adb_result = ADBActionResult("exception", None,
+                                                  max(0, round((time.monotonic() - verification_started) * 1000)))
                 self.diagnostics.event("buy_tap_returned", frame_id=frame_id, action_id=action_id,
                                        source="DeployPlanner.play",
-                                       data={"adb_call_returned": True,
+                                       data={"adb_call_returned": getattr(adb_result, "status", None) != "exception",
+                                             "adb_status": getattr(adb_result, "status", "succeeded"),
                                              "device_confirmation": "unknown"})
             else:
-                adb_result = (self.adb.tap(*choice.center, timeout=5, return_result=True)
-                              if self.verify_actions else self.adb.tap(*choice.center))
-            time.sleep(self.tap_delay)
+                try:
+                    adb_result = (self.adb.tap(*choice.center, timeout=budget.remaining(), return_result=True)
+                                  if self.verify_actions else self.adb.tap(*choice.center))
+                except Exception:
+                    if not self.verify_actions:
+                        raise
+                    adb_result = ADBActionResult("exception", None,
+                                                  max(0, round((time.monotonic() - verification_started) * 1000)))
+            time.sleep(min(self.tap_delay, budget.remaining()) if budget else self.tap_delay)
             capture_started = time.monotonic()
-            screen = self._take_screenshot("after_buy", action_id)
+            try:
+                screen = self._take_screenshot("after_buy", action_id,
+                                               timeout=budget.remaining() if budget else None)
+            except Exception:
+                screen = None
             capture_duration_ms = round((time.monotonic() - capture_started) * 1000)
             frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
             recognition_started = time.monotonic()
-            read = self._read_elixir(screen)
+            read = self._read_elixir(screen) if screen is not None else None
             if self.verify_actions:
                 after_cards = self.reader.shop_cards(screen) if screen is not None else []
                 before_observation = Observation(
                     phase=self.reader.phase(before_screen), elixir=elixir_before,
-                    shop_cards=self._shop_signature(cards), selected_slot=self._slot_index(choice),
+                    shop_cards=self._shop_signature(cards),
+                    selected_slot=self._selected_signature(cards, choice),
                 )
                 after_observation = Observation(
                     phase=self.reader.phase(screen) if screen is not None else None,
                     elixir=read, shop_cards=self._shop_signature(after_cards),
-                    selected_slot=self._slot_index(choice) if any(
-                        self._slot_index(card) == self._slot_index(choice) for card in after_cards
-                    ) else None,
+                    selected_slot=self._selected_signature(after_cards, choice),
                 )
                 result = self.action_verifier.verify_purchase(
                     action_id=action_id or f"local-{uuid.uuid4().hex}",
@@ -366,19 +409,23 @@ class DeployPlanner:
                 recognition_duration_ms = round((time.monotonic() - recognition_started) * 1000)
                 if result.status is ActionStatus.UNKNOWN:
                     for recheck in range(VERIFY_MAX_RECHECKS):
+                        if budget.remaining() <= 0:
+                            break
                         recheck_capture_started = time.monotonic()
-                        screen = self._take_screenshot("verification_recheck", action_id)
+                        try:
+                            screen = self._take_screenshot("verification_recheck", action_id,
+                                                           timeout=budget.remaining())
+                        except Exception:
+                            screen = None
                         capture_duration_ms += round((time.monotonic() - recheck_capture_started) * 1000)
                         frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
                         recheck_recognition_started = time.monotonic()
-                        read = self._read_elixir(screen)
+                        read = self._read_elixir(screen) if screen is not None else None
                         after_cards = self.reader.shop_cards(screen) if screen is not None else []
                         after_observation = Observation(
                             phase=self.reader.phase(screen) if screen is not None else None,
                             elixir=read, shop_cards=self._shop_signature(after_cards),
-                            selected_slot=self._slot_index(choice) if any(
-                                self._slot_index(card) == self._slot_index(choice) for card in after_cards
-                            ) else None,
+                            selected_slot=self._selected_signature(after_cards, choice),
                         )
                         recognition_duration_ms += round(
                             (time.monotonic() - recheck_recognition_started) * 1000
@@ -402,6 +449,8 @@ class DeployPlanner:
                         },
                     )
                 if result.status is not ActionStatus.CONFIRMED:
+                    if result.status in (ActionStatus.UNKNOWN, ActionStatus.INTERRUPTED):
+                        state.sync_required = True
                     reason = "verification_" + result.status.value.lower()
                     break
                 state.buy(choice.name, action_id=result.action_id)
@@ -483,8 +532,9 @@ class DeployPlanner:
     def _diagnostics_enabled(self):
         return bool(self.diagnostics and self.diagnostics.enabled)
 
-    def _take_screenshot(self, reason, action_id=None):
-        capture = (lambda: self.adb.screenshot(timeout=5)) if self.verify_actions else self.adb.screenshot
+    def _take_screenshot(self, reason, action_id=None, timeout=None):
+        capture = (lambda: self.adb.screenshot(timeout=5 if timeout is None else timeout)) \
+            if self.verify_actions else self.adb.screenshot
         if not self._diagnostics_enabled():
             return capture()
         try:
@@ -564,7 +614,17 @@ class DeployPlanner:
             return None
 
     def _shop_signature(self, cards):
-        return tuple((self._slot_index(card), card.name, card.cost) for card in cards)
+        entries = tuple((self._slot_index(card), card.name, card.cost) for card in cards)
+        if len(entries) != len(SHOP_CENTERS) or {entry[0] for entry in entries} != set(range(len(SHOP_CENTERS))):
+            return None
+        return tuple(sorted(entries))
+
+    def _selected_signature(self, cards, choice):
+        slot = self._slot_index(choice)
+        selected = [card for card in cards if self._slot_index(card) == slot]
+        if slot is None or len(selected) != 1:
+            return None
+        return slot, (selected[0].name, selected[0].cost)
 
     def _decision_reason(self, action_id):
         if self._last_decision and self._last_decision[0] == action_id:

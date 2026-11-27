@@ -32,18 +32,10 @@ class ADBScreenshotModeTests(unittest.TestCase):
         import subprocess
         return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
 
-    def test_default_mode_keeps_exec_out(self):
-        with self.controller(), patch("core.adb_controller.subprocess.run") as run:
-            run.return_value = self.completed([], stdout=self.png)
-            image = ADBController("adb", serial=self.serial).screenshot()
-
-        self.assertEqual(image.shape, (3, 4, 3))
-        self.assertEqual(run.call_args.args[0], ["adb", "-s", self.serial, "exec-out", "screencap", "-p"])
-
     def test_action_tap_reports_device_loss_and_timeout_without_raising(self):
         import subprocess
-
         controller = ADBController("adb", serial=self.serial)
+
         with patch("core.adb_controller.subprocess.run", return_value=self.completed(
                 [], returncode=1, stderr=b"device offline")):
             result = controller.tap(1, 2, timeout=5, return_result=True)
@@ -52,6 +44,14 @@ class ADBScreenshotModeTests(unittest.TestCase):
         with patch("core.adb_controller.subprocess.run", side_effect=subprocess.TimeoutExpired([], 5)):
             result = controller.tap(1, 2, timeout=5, return_result=True)
         self.assertEqual(result.status, "timeout")
+
+    def test_default_mode_keeps_exec_out(self):
+        with self.controller(), patch("core.adb_controller.subprocess.run") as run:
+            run.return_value = self.completed([], stdout=self.png)
+            image = ADBController("adb", serial=self.serial).screenshot()
+
+        self.assertEqual(image.shape, (3, 4, 3))
+        self.assertEqual(run.call_args.args[0], ["adb", "-s", self.serial, "exec-out", "screencap", "-p"])
 
     def test_invalid_mode_is_rejected_before_adb_access(self):
         with patch.dict(os.environ, {"ADB_SCREENSHOT_MODE": "unknown"}, clear=True):
@@ -102,6 +102,37 @@ class ADBScreenshotModeTests(unittest.TestCase):
 
         self.assertEqual(len(remote_paths), 2)
         self.assertNotEqual(*remote_paths)
+
+    def test_pull_uses_one_total_timeout_budget_for_capture_pull_and_cleanup(self):
+        clock = [0.0]
+        timeouts = []
+        controller = ADBController("adb", serial=self.serial)
+
+        def monotonic():
+            return clock[0]
+
+        def run(args, **kwargs):
+            timeout = kwargs["timeout"]
+            timeouts.append(timeout)
+            if "screencap" in args:
+                clock[0] += 0.4
+            elif "pull" in args:
+                Path(args[-1]).write_bytes(self.png)
+                clock[0] += 0.4
+            elif "rm" in args:
+                clock[0] += timeout
+            return self.completed(args)
+
+        with self.controller("pull"), \
+                patch("core.adb_controller.time.monotonic", side_effect=monotonic), \
+                patch("core.adb_controller.subprocess.run", side_effect=run):
+            controller = ADBController("adb", serial=self.serial)
+            controller.screenshot(timeout=1.0)
+
+        self.assertEqual(len(timeouts), 3)
+        self.assertEqual(timeouts[:2], [1.0, 0.6])
+        self.assertAlmostEqual(timeouts[2], 0.2)
+        self.assertLessEqual(clock[0], 1.0)
 
     def test_pull_screencap_error_raises_and_attempts_remote_cleanup(self):
         calls = []
