@@ -40,6 +40,9 @@ class ShopCard:
     name: str
     cost: int
     center: tuple
+    slot_index: int = None
+    cost_source: str = None
+    name_inliers: int = None
 
 
 @dataclass
@@ -52,8 +55,9 @@ class BoardState:
 
 
 class BoardReader:
-    def __init__(self, image_processor, identifier=None):
+    def __init__(self, image_processor, identifier=None, include_diagnostics=False):
         self.image_processor = image_processor
+        self.include_diagnostics = include_diagnostics
         self.identifier = identifier or CardIdentifier(load_art_library())
         self._label_templates = {}
         for phase, path in PHASE_LABELS.items():
@@ -88,10 +92,17 @@ class BoardReader:
             name, inliers = self.identifier.identify(screen[y0:y1, x0:x1])
             if name is None:
                 continue
-            cost = self._read_cost(screen, index) or unit_costs.get(name)
+            recognized_cost = self._read_cost(screen, index)
+            cost = recognized_cost or unit_costs.get(name)
             if cost is None:
                 continue
-            cards.append(ShopCard(name=name, cost=cost, center=SHOP_CENTERS[index]))
+            if getattr(self, "include_diagnostics", False):
+                cost_source = "recognized_digit" if recognized_cost else "fallback_unit_costs"
+                cards.append(ShopCard(name=name, cost=cost, center=SHOP_CENTERS[index],
+                                      slot_index=index, cost_source=cost_source,
+                                      name_inliers=inliers))
+            else:
+                cards.append(ShopCard(name=name, cost=cost, center=SHOP_CENTERS[index]))
         return cards
 
     def _read_cost(self, screen, index):

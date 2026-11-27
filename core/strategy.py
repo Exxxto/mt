@@ -21,6 +21,7 @@ from config.board_layout import (
     SELL_THRESHOLD,
 )
 from config.target_comp import TARGET_COMP, target_rank
+from config.board_layout import SHOP_CENTERS
 
 logger = logging.getLogger(__name__)
 
@@ -67,73 +68,203 @@ class RunState:
 
 
 class DeployPlanner:
-    def __init__(self, reader, adb, tap_delay=0.6):
+    def __init__(self, reader, adb, tap_delay=0.6, diagnostics=None):
         self.reader = reader
         self.adb = adb
         self.tap_delay = tap_delay
+        self.diagnostics = diagnostics
+        self._last_decision = None
 
-    def choose(self, cards, elixir, state):
+    def choose(self, cards, elixir, state, *, action_id=None, frame_id=None,
+               elixir_certainty="observed"):
         """Pick the card to buy, or None to save the elixir"""
+        diagnostic_enabled = bool(self.diagnostics and self.diagnostics.enabled)
+        decision_started = time.perf_counter() if diagnostic_enabled else None
         affordable = [card for card in cards if card.cost <= elixir]
         if not affordable:
+            if diagnostic_enabled:
+                reason = "no_cards" if not cards else "insufficient_elixir"
+                self._record_decision(cards, affordable, elixir, state, None, reason,
+                                      action_id, frame_id, decision_started, elixir_certainty)
             return None
 
         # 1. A duplicate merges a deployed troop and hands one elixir back.
         duplicates = [card for card in affordable if card.name in state.copies]
         if duplicates:
             duplicates.sort(key=lambda card: (state.copies_to_next_star(card.name), card.cost))
-            return duplicates[0]
+            choice = duplicates[0]
+            if diagnostic_enabled:
+                tie = sum((state.copies_to_next_star(card.name), card.cost) ==
+                          (state.copies_to_next_star(choice.name), choice.cost)
+                          for card in cards if card.name in state.copies) > 1
+                self._record_decision(cards, affordable, elixir, state, choice, "duplicate",
+                                      action_id, frame_id, decision_started, elixir_certainty,
+                                      "original_order" if tie else None)
+            return choice
 
         # 2. Strengthen the target comp if a target troop is on offer.
         targets = [card for card in affordable if card.name in TARGET_COMP]
         if targets:
             targets.sort(key=lambda card: (target_rank(card.name), card.cost))
-            return targets[0]
+            choice = targets[0]
+            if diagnostic_enabled:
+                tie = sum((target_rank(card.name), card.cost) ==
+                          (target_rank(choice.name), choice.cost)
+                          for card in cards if card.name in TARGET_COMP and card.cost <= elixir) > 1
+                self._record_decision(cards, affordable, elixir, state, choice, "target_tier_priority",
+                                      action_id, frame_id, decision_started, elixir_certainty,
+                                      "original_order" if tie else None)
+            return choice
 
         # 3. Nothing we want on the shelf. Buy the cheapest card anyway: a
         #    purchase replaces that shop slot with a new card, so buying rerolls
         #    the shop and lets a target/duplicate appear instead of stalling
         #    with the same three cards every round.
-        return min(affordable, key=lambda card: card.cost)
+        choice = min(affordable, key=lambda card: card.cost)
+        if diagnostic_enabled:
+            tie = sum(card.cost == choice.cost for card in affordable) > 1
+            self._record_decision(cards, affordable, elixir, state, choice, "cheapest_fallback",
+                                  action_id, frame_id, decision_started, elixir_certainty,
+                                  "original_order" if tie else None)
+        return choice
+
+    def _record_decision(self, cards, affordable, elixir, state, choice, reason,
+                         action_id, frame_id, started, elixir_certainty, tiebreak=None):
+        if not self.diagnostics or not self.diagnostics.enabled:
+            return
+
+        affordable_ids = {id(card) for card in affordable}
+        candidates = []
+        for card in cards:
+            copies = state.copies.get(card.name, 0)
+            try:
+                slot_index = card.slot_index
+                if slot_index is None:
+                    slot_index = SHOP_CENTERS.index(tuple(card.center))
+            except (AttributeError, TypeError, ValueError):
+                slot_index = None
+            candidates.append({
+                "name": card.name,
+                "cost": card.cost,
+                "cost_source": getattr(card, "cost_source", None),
+                "name_inliers": getattr(card, "name_inliers", None),
+                "slot_index": slot_index,
+                "center": list(card.center) if getattr(card, "center", None) is not None else None,
+                "affordable": id(card) in affordable_ids,
+                "is_duplicate": card.name in state.copies,
+                "copies_before": {"value": copies, "certainty": "inferred",
+                                  "source": "RunState.copies"},
+                "copies_to_next_star": {"value": state.copies_to_next_star(card.name),
+                                         "certainty": "inferred", "calculation": "RunState"},
+                "target_rank": target_rank(card.name),
+                "target_member": card.name in TARGET_COMP,
+            })
+
+        selected = next((candidate for card, candidate in zip(cards, candidates)
+                         if card is choice), None)
+        elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        self._last_decision = (action_id, reason)
+        self.diagnostics.event("decision", frame_id=frame_id, action_id=action_id,
+                               source="DeployPlanner.choose", data={
+            "elixir": {"value": elixir, "certainty": elixir_certainty},
+            "offered_cards": candidates,
+            "affordable_cards": [item for item in candidates if item["affordable"]],
+            "unaffordable_cards": [item for item in candidates if not item["affordable"]],
+            "duplicate_cards": [item for item in candidates if item["affordable"] and item["is_duplicate"]],
+            "target_cards": [item for item in candidates if item["affordable"] and item["target_member"]],
+            "selected": selected,
+            "reason": reason,
+            "legacy_save_reason": self._save_reason(cards, elixir, state) if choice is None else None,
+            "selection_tiebreak": tiebreak,
+            "run_state_before": {"copies": dict(state.copies), "purchases": list(state.purchases),
+                                 "distinct_kinds": len(state.copies), "certainty": "inferred"},
+            "decision_duration_ms": elapsed_ms,
+        })
 
     def play(self, screen, state, max_buys=6, dry_run=False):
         """Play one deploy phase: pop the orbs, then spend the elixir"""
+        diagnostic_enabled = bool(self.diagnostics and self.diagnostics.enabled)
+        frame_id = self.diagnostics.record_frame(screen, reason="deploy_phase_input") if diagnostic_enabled else None
         orbs = self.reader.orbs(screen)
+        if diagnostic_enabled:
+            self.diagnostics.event("orb_detection", frame_id=frame_id,
+                                   source="DeployPlanner.play",
+                                   data={"coordinates": [list(point) for point in orbs],
+                                         "count": len(orbs), "certainty": "observed",
+                                         "call_source": "deploy_planner"})
         for x, y in orbs:
             logger.info(f"[ORB] popping quest orb at ({x}, {y})")
             if not dry_run:
-                self.adb.tap(x, y)
+                action_id = self.diagnostics.new_action_id() if diagnostic_enabled else None
+                if diagnostic_enabled:
+                    self.diagnostics.event("orb_tap_attempt", frame_id=frame_id, action_id=action_id,
+                                           source="DeployPlanner.play",
+                                           data={"coordinates": [x, y], "status": "attempted",
+                                                 "call_source": "deploy_planner"})
+                    try:
+                        self.adb.tap(x, y)
+                    except Exception as exc:
+                        self.diagnostics.event("adb_error", frame_id=frame_id, action_id=action_id,
+                                               source="DeployPlanner.play",
+                                               data={"operation": "orb_tap", "error_type": type(exc).__name__,
+                                                     "coordinates": [x, y], "certainty": "observed"})
+                        raise
+                else:
+                    self.adb.tap(x, y)
+                if diagnostic_enabled:
+                    self.diagnostics.event("orb_tap_returned", frame_id=frame_id, action_id=action_id,
+                                           source="DeployPlanner.play",
+                                           data={"adb_call_returned": True, "device_confirmation": "unknown"})
                 time.sleep(self.tap_delay)
         if orbs and not dry_run:
-            screen = self.adb.screenshot()
+            screen = self._take_screenshot("after_orb_taps")
+            frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
 
         elixir = self._read_elixir(screen)
+        elixir_certainty = "observed" if elixir is not None else "unknown"
         if elixir is None and not dry_run:
             # A round opens with a modal notification that covers the elixir
             # badge and the shop for a few seconds, so poll until it clears.
             for _ in range(10):
                 time.sleep(0.7)
-                fresh = self.adb.screenshot()
+                fresh = self._take_screenshot("elixir_poll")
                 if fresh is not None:
                     screen = fresh
+                    frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
                     elixir = self._read_elixir(screen)
+                    if elixir is not None:
+                        elixir_certainty = "observed"
                 if elixir is not None:
                     break
         units_before = self.reader.own_units(screen)
+        if diagnostic_enabled:
+            self._record_state(screen, frame_id, elixir, elixir_certainty, None, None,
+                               units_before, None, state, "deploy_initial_state")
 
         bought = []
         reason = "done"
         for _ in range(max_buys):
             if screen is None or elixir is None:
                 reason = "no_elixir"
+                if diagnostic_enabled:
+                    self.diagnostics.event("purchase_refused", frame_id=frame_id,
+                                           action_id=self.diagnostics.new_action_id(),
+                                           source="DeployPlanner.play",
+                                           data={"reason": "unknown_elixir" if elixir is None else "no_frame",
+                                                 "recognized_elixir": None if elixir is None else elixir,
+                                                 "certainty": "unknown" if elixir is None else elixir_certainty})
                 break
             cards = self.reader.shop_cards(screen)
+            if diagnostic_enabled:
+                self._record_state(screen, frame_id, elixir, elixir_certainty,
+                                   cards, None, None, None, state, "shop_observation")
             if not cards and not dry_run:
                 # The purchase animation briefly hides the shop; retry before
                 # giving up so leftover elixir is not wasted.
                 for _ in range(5):
                     time.sleep(0.6)
-                    screen = self.adb.screenshot()
+                    screen = self._take_screenshot("shop_recognition_retry")
+                    frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
                     cards = self.reader.shop_cards(screen)
                     if cards:
                         break
@@ -142,8 +273,20 @@ class DeployPlanner:
                 # the caller retries on a later frame of the same deploy phase.
                 reason = "no_cards"
                 logger.info("[SHOP] no shop cards recognised, will retry")
+                if diagnostic_enabled:
+                    self.diagnostics.event("purchase_refused", frame_id=frame_id,
+                                           action_id=self.diagnostics.new_action_id(),
+                                           source="DeployPlanner.play",
+                                           data={"reason": "no_cards", "recognized_cards": [],
+                                                 "elixir": {"value": elixir, "certainty": elixir_certainty}})
                 break
-            choice = self.choose(cards, elixir, state)
+            action_id = self.diagnostics.new_action_id() if diagnostic_enabled else None
+            frame_id = self.diagnostics.record_frame(screen, reason="shop_decision") if diagnostic_enabled else None
+            if diagnostic_enabled:
+                choice = self.choose(cards, elixir, state, action_id=action_id, frame_id=frame_id,
+                                     elixir_certainty=elixir_certainty)
+            else:
+                choice = self.choose(cards, elixir, state)
             if choice is None:
                 reason = self._save_reason(cards, elixir, state)
                 logger.info(
@@ -154,15 +297,58 @@ class DeployPlanner:
 
             logger.info(f"[BUY] {choice.name} ({choice.cost}) -> {state.star(choice.name)}*")
             if dry_run:
+                if diagnostic_enabled:
+                    copies_before = state.copies.get(choice.name, 0)
+                    star_before = state.star(choice.name)
                 state.buy(choice.name)
                 bought.append(choice.name)
                 elixir -= choice.cost
+                if diagnostic_enabled:
+                    self.diagnostics.event("buy_simulated", frame_id=frame_id, action_id=action_id,
+                                           source="DeployPlanner.play",
+                                           data={"name": choice.name, "cost": choice.cost,
+                                                 "certainty": "assumed", "dry_run": True})
+                    self._record_upgrade(choice.name, copies_before, star_before, state,
+                                         frame_id, action_id)
                 continue
 
             elixir_before = elixir
-            self.adb.tap(*choice.center)
+            if diagnostic_enabled:
+                copies_before = state.copies.get(choice.name, 0)
+                star_before = state.star(choice.name)
+                self.diagnostics.event("buy_attempt", frame_id=frame_id, action_id=action_id,
+                                       source="DeployPlanner.play",
+                                       data={"name": choice.name, "cost": choice.cost,
+                                             "cost_source": getattr(choice, "cost_source", None),
+                                             "cost_certainty": ("observed" if getattr(choice, "cost_source", None) == "recognized_digit"
+                                                                else "inferred" if getattr(choice, "cost_source", None) == "fallback_unit_costs"
+                                                                else "unknown"),
+                                             "slot_index": self._slot_index(choice),
+                                             "coordinates": list(choice.center),
+                                             "elixir_before": {"value": elixir_before,
+                                                               "certainty": elixir_certainty},
+                                             "run_state_before": {"copies": dict(state.copies),
+                                                                  "purchases": list(state.purchases),
+                                                                  "certainty": "inferred"},
+                                             "selection_reason": self._decision_reason(action_id),
+                                             "tap_status": "attempted"})
+                try:
+                    self.adb.tap(*choice.center)
+                except Exception as exc:
+                    self.diagnostics.event("adb_error", frame_id=frame_id, action_id=action_id,
+                                           source="DeployPlanner.play",
+                    data={"operation": "buy_tap", "error_type": type(exc).__name__,
+                                                 "certainty": "observed"})
+                    raise
+                self.diagnostics.event("buy_tap_returned", frame_id=frame_id, action_id=action_id,
+                                       source="DeployPlanner.play",
+                                       data={"adb_call_returned": True,
+                                             "device_confirmation": "unknown"})
+            else:
+                self.adb.tap(*choice.center)
             time.sleep(self.tap_delay)
-            screen = self.adb.screenshot()
+            screen = self._take_screenshot("after_buy", action_id)
+            frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
             read = self._read_elixir(screen)
             # A successful buy spends elixir and takes the card off the shelf, so
             # only treat it as "bench full" when the balance did not drop AND the
@@ -174,8 +360,18 @@ class DeployPlanner:
                 )
                 if still_offered:
                     logger.info("[SHOP] buy had no effect (bench full?), selling a bench unit")
-                    if self._sell_one(screen):
-                        screen = self.adb.screenshot()
+                    if diagnostic_enabled:
+                        self.diagnostics.event("buy_outcome", frame_id=frame_id, action_id=action_id,
+                                               source="DeployPlanner.play",
+                                               data={"legacy_classification": "no_effect_suspected",
+                                                     "confirmation": "inferred",
+                                                     "recognized_elixir_after": read,
+                                                     "same_card_still_offered": True})
+                    sold = (self._sell_one(screen, action_id=action_id, reason="suspected_no_effect")
+                            if diagnostic_enabled else self._sell_one(screen))
+                    if sold:
+                        screen = self._take_screenshot("after_sale", action_id)
+                        frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
                         reason = "bench full"
                         continue
                     reason = "bench full, could not sell"
@@ -184,8 +380,32 @@ class DeployPlanner:
             state.buy(choice.name)
             bought.append(choice.name)
             elixir = read if read is not None else elixir_before - choice.cost
+            elixir_certainty = "observed" if read is not None else "assumed"
+            if diagnostic_enabled:
+                self.diagnostics.event("buy_outcome", frame_id=frame_id, action_id=action_id,
+                                       source="DeployPlanner.play",
+                                       data={"legacy_classification": "accepted_by_legacy_logic",
+                                             "confirmation": "inferred" if read is not None else "assumed",
+                                             "recognized_elixir_after": {"value": read,
+                                                                          "certainty": "observed" if read is not None else "unknown"},
+                                             "assumed_balance_after": {"value": elixir,
+                                                                        "certainty": "inferred" if read is not None else "assumed",
+                                                                        "reason": "legacy_cost_subtraction" if read is None else None},
+                                             "run_state_after": {"copies": dict(state.copies),
+                                                                 "purchases": list(state.purchases),
+                                                                 "certainty": "inferred"}})
+                self._record_upgrade(choice.name, copies_before, star_before, state,
+                                     frame_id, action_id)
+        else:
+            if diagnostic_enabled:
+                self.diagnostics.event("purchase_limit", frame_id=frame_id,
+                                       source="DeployPlanner.play",
+                                       data={"max_buys": max_buys, "certainty": "observed"})
 
         units_after = self.reader.own_units(screen) if screen is not None else 0
+        if diagnostic_enabled:
+            self._record_state(screen, self.diagnostics.frame_id(screen), elixir, elixir_certainty,
+                               None, None, None, units_after, state, "deploy_final_state")
         summary = {
             "elixir": elixir,
             "bought": bought,
@@ -201,23 +421,164 @@ class DeployPlanner:
         )
         return summary
 
-    def _sell_one(self, screen):
+    def _diagnostics_enabled(self):
+        return bool(self.diagnostics and self.diagnostics.enabled)
+
+    def _take_screenshot(self, reason, action_id=None):
+        if not self._diagnostics_enabled():
+            return self.adb.screenshot()
+        try:
+            shot = self.adb.screenshot()
+        except Exception as exc:
+            self.diagnostics.event("screenshot_error", action_id=action_id,
+                                   source="DeployPlanner.play",
+                                   data={"reason": reason, "error_type": type(exc).__name__,
+                                         "certainty": "observed"})
+            raise
+        if shot is not None:
+            self.diagnostics.record_frame(shot, reason=reason)
+        return shot
+
+    def _record_state(self, screen, frame_id, elixir, elixir_certainty,
+                      cards, orbs, units_before, units_after, state, source):
+        if not self._diagnostics_enabled():
+            return
+        card_records = None
+        if cards is not None:
+            card_records = [{
+                "name": card.name,
+                "cost": {"value": card.cost,
+                         "certainty": ("observed" if getattr(card, "cost_source", None) == "recognized_digit"
+                                       else "inferred" if getattr(card, "cost_source", None) == "fallback_unit_costs"
+                                       else "unknown"),
+                         "source": getattr(card, "cost_source", None)},
+                "slot_index": self._slot_index(card),
+                "coordinates": list(card.center),
+                "name_inliers": getattr(card, "name_inliers", None),
+                "certainty": "observed",
+            } for card in cards]
+        self.diagnostics.event("state_snapshot", frame_id=frame_id,
+                               source="DeployPlanner.play",
+                               data={"snapshot_source": source,
+                                     "screen_available": screen is not None,
+                                     "elixir": {"value": elixir, "certainty": elixir_certainty},
+                                     "shop_cards": card_records,
+                                     "orbs": {"coordinates": [list(p) for p in orbs],
+                                              "certainty": "observed"} if orbs is not None else None,
+                                     "own_units": {
+                                         "before": {"value": units_before, "certainty": "approximate"}
+                                         if units_before is not None else None,
+                                         "after": {"value": units_after, "certainty": "approximate"}
+                                         if units_after is not None else None,
+                                     },
+                                     "run_state": {"copies": dict(state.copies),
+                                                   "purchases": list(state.purchases),
+                                                   "distinct_kinds": len(state.copies),
+                                                   "calculated_stars": {
+                                                       name: state.star(name) for name in state.copies
+                                                   },
+                                                   "certainty": "inferred"}})
+
+    def _record_upgrade(self, name, copies_before, star_before, state, frame_id, action_id):
+        if not self._diagnostics_enabled():
+            return
+        copies_after = state.copies.get(name, 0)
+        star_after = state.star(name)
+        self.diagnostics.event("calculated_upgrade", frame_id=frame_id, action_id=action_id,
+                               source="RunState.star",
+                               data={"name": name,
+                                     "copies_before": {"value": copies_before, "certainty": "inferred"},
+                                     "copies_after": {"value": copies_after, "certainty": "inferred"},
+                                     "stars_before": {"value": star_before, "certainty": "calculated"},
+                                     "stars_after": {"value": star_after, "certainty": "calculated"},
+                                     "threshold_reached": star_after > star_before,
+                                     "merge_observed": False})
+
+    @staticmethod
+    def _slot_index(card):
+        try:
+            if card.slot_index is not None:
+                return card.slot_index
+            return SHOP_CENTERS.index(tuple(card.center))
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _decision_reason(self, action_id):
+        if self._last_decision and self._last_decision[0] == action_id:
+            return self._last_decision[1]
+        return None
+
+    def _sell_one(self, screen, *, action_id=None, reason=None):
         """Sell one reserve (bench) unit to free space; True if one was sold.
 
         Only bench cells are tapped, never the board, so a merged or deployed
         troop is never sold.
         """
         ip = self.reader.image_processor
+        diagnostic_enabled = self._diagnostics_enabled()
+        initial_frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
+        if diagnostic_enabled:
+            self.diagnostics.event("sale_attempt_started", frame_id=initial_frame_id,
+                                   action_id=action_id, source="DeployPlanner._sell_one",
+                                   data={"reason": reason, "sold_unit": None})
         for cx, cy in BENCH_CELLS:
-            self.adb.tap(cx, cy)
+            if diagnostic_enabled:
+                self.diagnostics.event("sale_slot_tap_attempt", frame_id=initial_frame_id,
+                                       action_id=action_id, source="DeployPlanner._sell_one",
+                                       data={"slot_center": [cx, cy], "status": "attempted"})
+                try:
+                    self.adb.tap(cx, cy)
+                except Exception as exc:
+                    self.diagnostics.event("adb_error", frame_id=initial_frame_id, action_id=action_id,
+                                           source="DeployPlanner._sell_one",
+                                           data={"operation": "sale_slot_tap", "error_type": type(exc).__name__,
+                                                 "coordinates": [cx, cy], "certainty": "observed"})
+                    raise
+            else:
+                self.adb.tap(cx, cy)
+            if diagnostic_enabled:
+                self.diagnostics.event("sale_slot_tap_returned", frame_id=initial_frame_id,
+                                       action_id=action_id, source="DeployPlanner._sell_one",
+                                       data={"slot_center": [cx, cy], "device_confirmation": "unknown"})
             time.sleep(0.4)
-            shot = self.adb.screenshot()
+            shot = self._take_screenshot("sale_slot_probe", action_id)
+            shot_frame_id = self.diagnostics.frame_id(shot) if diagnostic_enabled else None
             pos = ip.find_template(shot, SELL_BUTTON, SELL_THRESHOLD)
+            if diagnostic_enabled:
+                self.diagnostics.event("sale_slot_probe", frame_id=shot_frame_id,
+                                       action_id=action_id, source="DeployPlanner._sell_one",
+                                       data={"slot_center": [cx, cy], "sell_button_found": bool(pos),
+                                             "sell_button_coordinates": list(pos) if pos else None,
+                                             "certainty": "observed"})
             if pos:
                 logger.info(f"[SELL] selling a bench unit at ({cx}, {cy})")
-                self.adb.tap(*pos)
+                if diagnostic_enabled:
+                    self.diagnostics.event("sale_button_tap_attempt", frame_id=shot_frame_id,
+                                           action_id=action_id, source="DeployPlanner._sell_one",
+                                           data={"coordinates": list(pos), "sold_unit": None,
+                                                 "status": "attempted"})
+                    try:
+                        self.adb.tap(*pos)
+                    except Exception as exc:
+                        self.diagnostics.event("adb_error", frame_id=shot_frame_id, action_id=action_id,
+                                               source="DeployPlanner._sell_one",
+                                               data={"operation": "sale_button_tap", "error_type": type(exc).__name__,
+                                                     "coordinates": list(pos), "certainty": "observed"})
+                        raise
+                else:
+                    self.adb.tap(*pos)
+                if diagnostic_enabled:
+                    self.diagnostics.event("sale_outcome", frame_id=shot_frame_id,
+                                           action_id=action_id, source="DeployPlanner._sell_one",
+                                           data={"legacy_return": True, "confirmation": "unknown",
+                                                 "button_tap_path": True, "sold_unit": None})
                 time.sleep(0.6)
                 return True
+        if diagnostic_enabled:
+            self.diagnostics.event("sale_outcome", frame_id=initial_frame_id,
+                                   action_id=action_id, source="DeployPlanner._sell_one",
+                                   data={"legacy_return": False, "confirmation": "unknown",
+                                         "sell_button_found": False, "sold_unit": None})
         return False
 
     def _save_reason(self, cards, elixir, state):
