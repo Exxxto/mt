@@ -5,6 +5,8 @@ Handles all Android Debug Bridge interactions.
 
 import os
 import subprocess
+import tempfile
+import uuid
 import cv2
 import numpy as np
 import logging
@@ -15,6 +17,9 @@ logger = logging.getLogger(__name__)
 class ADBController:
     def __init__(self, adb_path, serial=None):
         self.adb_path = adb_path
+        self.screenshot_mode = os.environ.get("ADB_SCREENSHOT_MODE", "exec-out").strip().lower()
+        if self.screenshot_mode not in {"exec-out", "pull"}:
+            raise ValueError("ADB_SCREENSHOT_MODE must be 'exec-out' or 'pull'")
         # BlueStacks exposes the same instance twice (emulator-5554 + 127.0.0.1:5555),
         # so a bare "adb" call fails with "more than one device/emulator".
         self.serial = serial or os.environ.get("ADB_SERIAL") or self._detect_serial()
@@ -63,6 +68,9 @@ class ADBController:
 
     def screenshot(self):
         """Take a screenshot using ADB"""
+        if self.screenshot_mode == "pull":
+            return self._screenshot_pull()
+
         try:
             result = subprocess.run(
                 self._adb_cmd("exec-out", "screencap", "-p"),
@@ -83,6 +91,56 @@ class ADBController:
             logger.error("Screenshot failed: could not decode image")
             raise RuntimeError("Screenshot failed: could not decode image")
         return img
+
+    def _screenshot_pull(self):
+        """Capture to a unique device file, pull it locally, and decode the PNG."""
+        remote_path = f"/data/local/tmp/merge-tactics-{uuid.uuid4().hex}.png"
+        try:
+            with tempfile.TemporaryDirectory(prefix="merge-tactics-") as temp_dir:
+                local_path = os.path.join(temp_dir, "screenshot.png")
+                self._run_adb_checked(
+                    self._adb_cmd("shell", "screencap", "-p", remote_path), "screencap", timeout=20
+                )
+                self._run_adb_checked(
+                    self._adb_cmd("pull", remote_path, local_path), "pull", timeout=20
+                )
+                try:
+                    with open(local_path, "rb") as screenshot_file:
+                        png = screenshot_file.read()
+                except FileNotFoundError as error:
+                    raise RuntimeError("ADB pull did not create a screenshot file") from error
+
+                if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise RuntimeError("Screenshot failed: pulled file is not a PNG")
+                image = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+                if image is None:
+                    raise RuntimeError("Screenshot failed: could not decode pulled PNG")
+                return image
+        finally:
+            try:
+                result = subprocess.run(
+                    self._adb_cmd("shell", "rm", "-f", remote_path),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5,
+                )
+                if result.returncode != 0:
+                    logger.warning("Could not remove temporary ADB screenshot")
+            except Exception as error:
+                logger.warning("Could not remove temporary ADB screenshot: %s", type(error).__name__)
+
+    @staticmethod
+    def _run_adb_checked(command, operation, timeout):
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            error = result.stderr.decode(errors="replace").strip() or f"exit code {result.returncode}"
+            raise RuntimeError(f"ADB {operation} failed: {error}")
+        return result
 
     def tap(self, x, y):
         """Perform a tap at coordinates (x, y)"""
