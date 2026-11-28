@@ -8,3 +8,7 @@ __pycache__/
 .commandcode/
 .freebuff/
 recordings/
+.venv-ml/
+ml_artifacts/
+.yolo/
+yolo26n.pt

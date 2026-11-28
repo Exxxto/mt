@@ -22,6 +22,7 @@ class BenchSlot:
     recognition_method: str | None = None
     recognition_score: float | None = None
     occupancy_score: float | None = None
+    unit_box: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,7 @@ class BenchReader:
                                    'observed' if occupancy != 'unknown' else 'unknown',
                                    'observed' if name else 'unknown', 'unknown',
                                    'template_correlation' if match_score is not None else None,
-                                   match_score, score))
+                                   match_score, score, match_box if name else None))
             matches.append(match_box if name else None)
         for index in range(1, len(slots)):
             first, second = matches[index - 1:index + 1]

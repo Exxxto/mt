@@ -1,0 +1,16 @@
+{
+  "model": "yolo26n",
+  "epochs": 40,
+  "imgsz": 640,
+  "batch": 2,
+  "device": "cuda:0",
+  "patience": 10,
+  "seed": 41042,
+  "confidence": 0.25,
+  "label_score_threshold": 0.8,
+  "temporal_max_gap_frames": 12,
+  "near_duplicate_phash_distance": 1,
+  "max_improve_rounds": 1,
+  "min_train_objects": 12,
+  "min_validation_objects": 2
+}

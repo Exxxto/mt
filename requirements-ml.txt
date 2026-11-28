@@ -1,0 +1,4 @@
+# CUDA-tagged wheels prevent an accidental CPU-only install.
+torch==2.12.1+cu132
+torchvision==0.27.1+cu132
+ultralytics==8.4.215
