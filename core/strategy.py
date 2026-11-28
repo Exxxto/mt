@@ -45,6 +45,8 @@ class RunState:
     purchases: list = field(default_factory=list)
     applied_action_ids: set = field(default_factory=set)
     sync_required: bool = False
+    safe_mode: bool = False
+    uncertain_transactions: list = field(default_factory=list)
 
     def buy(self, name, action_id=None):
         if action_id is not None and action_id in self.applied_action_ids:
@@ -79,17 +81,19 @@ class RunState:
 
 
 class DeployPlanner:
-    def __init__(self, reader, adb, tap_delay=0.6, diagnostics=None, verify_actions=False):
+    def __init__(self, reader, adb, tap_delay=0.6, diagnostics=None, verify_actions=False,
+                 max_frame_age_seconds=3.0):
         self.reader = reader
         self.adb = adb
         self.tap_delay = tap_delay
         self.diagnostics = diagnostics
         self.verify_actions = verify_actions
+        self.max_frame_age_seconds = max_frame_age_seconds
         self.action_verifier = ActionVerifier()
         self._last_decision = None
 
     def choose(self, cards, elixir, state, *, action_id=None, frame_id=None,
-               elixir_certainty="observed"):
+               elixir_certainty="observed", ignore_copies=False):
         """Pick the card to buy, or None to save the elixir"""
         diagnostic_enabled = bool(self.diagnostics and self.diagnostics.enabled)
         decision_started = time.perf_counter() if diagnostic_enabled else None
@@ -102,7 +106,7 @@ class DeployPlanner:
             return None
 
         # 1. A duplicate merges a deployed troop and hands one elixir back.
-        duplicates = [card for card in affordable if card.name in state.copies]
+        duplicates = [] if ignore_copies else [card for card in affordable if card.name in state.copies]
         if duplicates:
             duplicates.sort(key=lambda card: (state.copies_to_next_star(card.name), card.cost))
             choice = duplicates[0]
@@ -194,11 +198,9 @@ class DeployPlanner:
             "decision_duration_ms": elapsed_ms,
         })
 
-    def play(self, screen, state, max_buys=6, dry_run=False):
+    def play(self, screen, state, max_buys=6, dry_run=False, captured_at=None):
         """Play one deploy phase: pop the orbs, then spend the elixir"""
-        if self.verify_actions and state.sync_required:
-            return {"elixir": None, "bought": [], "orbs": 0, "units": 0,
-                    "units_before": 0, "roster": state.report(), "reason": "state_sync_required"}
+        captured_at = time.monotonic() if captured_at is None else captured_at
         diagnostic_enabled = bool(self.diagnostics and self.diagnostics.enabled)
         frame_id = self.diagnostics.record_frame(screen, reason="deploy_phase_input") if diagnostic_enabled else None
         orbs = self.reader.orbs(screen)
@@ -213,6 +215,10 @@ class DeployPlanner:
 
         elixir = self._read_elixir(screen)
         elixir_certainty = "observed" if elixir is not None else "unknown"
+        last_observed_elixir = elixir
+        transaction_start_elixir = None
+        transaction_status = None
+        resolved_buys = []
         if self.verify_actions and (screen is None or self.reader.phase(screen) != "deploy"):
             return {"elixir": elixir, "bought": [], "orbs": len(orbs), "units": 0,
                     "units_before": 0, "roster": state.report(), "reason": "phase_unknown"}
@@ -224,21 +230,111 @@ class DeployPlanner:
                 fresh = self._take_screenshot("elixir_poll")
                 if fresh is not None:
                     screen = fresh
+                    captured_at = self._last_capture_at
                     frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
                     if self.verify_actions and self.reader.phase(screen) != "deploy":
                         return {"elixir": None, "bought": [], "orbs": len(orbs), "units": 0,
                                 "units_before": 0, "roster": state.report(), "reason": "phase_ended"}
-                    elixir = self._read_elixir(screen)
-                    if elixir is not None:
+                    refreshed_elixir = self._read_elixir(screen)
+                    if refreshed_elixir is not None:
+                        elixir = refreshed_elixir
+                        last_observed_elixir = refreshed_elixir
                         elixir_certainty = "observed"
                 if elixir is not None:
                     break
         units_before = self.reader.own_units(screen)
+        if self.verify_actions and state.sync_required:
+            pending = next((item for item in reversed(state.uncertain_transactions)
+                            if item["status"] == "pending"), None)
+            if pending is None and not state.safe_mode:
+                if diagnostic_enabled:
+                    self.diagnostics.event("purchase_blocked", frame_id=frame_id,
+                                           source="DeployPlanner.play",
+                                           data={"reason": "state_sync_required",
+                                                 "pending_transactions": len(state.uncertain_transactions)})
+                return {"elixir": elixir, "bought": [], "orbs": len(orbs), "units": units_before,
+                        "units_before": units_before, "roster": state.report(),
+                        "reason": "state_sync_required"}
+            if pending is not None:
+                current_cards = self.reader.shop_cards(screen)
+                current = Observation(
+                    phase=self.reader.phase(screen), elixir=elixir,
+                    shop_cards=self._shop_signature(current_cards),
+                    selected_slot=self._selected_signature(current_cards, pending["choice"]),
+                    own_units=units_before,
+                )
+                if current.elixir is None:
+                    if diagnostic_enabled:
+                        self.diagnostics.event("uncertain_transaction_waiting", frame_id=frame_id,
+                                               action_id=pending["action_id"],
+                                               data={"reason": "elixir_not_observed",
+                                                     "observations": pending["observations"]})
+                    return {"elixir": elixir, "bought": [], "orbs": len(orbs),
+                            "units": units_before, "units_before": units_before,
+                            "roster": state.report(), "reason": "verification_pending"}
+                resolution = self.action_verifier.verify_purchase(
+                    action_id=pending["action_id"], adb_status="succeeded",
+                    frame_before=pending["frame_id"], frame_after=frame_id,
+                    before=pending["before"], after=current, cost=pending["cost"],
+                    allow_unit_count=not state.safe_mode,
+                )
+                if resolution.status is ActionStatus.CONFIRMED:
+                    state.buy(pending["name"], action_id=pending["action_id"])
+                    resolved_buys.append(pending["name"])
+                    pending["status"] = "resolved_confirmed"
+                    transaction_start_elixir = pending["before"].elixir
+                    transaction_status = resolution.status.value
+                    state.uncertain_transactions.remove(pending)
+                    state.sync_required = state.safe_mode or bool(state.uncertain_transactions)
+                    if diagnostic_enabled:
+                        self.diagnostics.event("uncertain_transaction_resolved", frame_id=frame_id,
+                                               action_id=pending["action_id"],
+                                               data={"resolution": "confirmed", "evidence": resolution.evidence,
+                                                     "run_state_updated": True})
+                elif resolution.status is ActionStatus.FAILED:
+                    pending["status"] = "resolved_failed"
+                    transaction_start_elixir = pending["before"].elixir
+                    transaction_status = resolution.status.value
+                    state.uncertain_transactions.remove(pending)
+                    state.sync_required = state.safe_mode or bool(state.uncertain_transactions)
+                    if diagnostic_enabled:
+                        self.diagnostics.event("uncertain_transaction_resolved", frame_id=frame_id,
+                                               action_id=pending["action_id"],
+                                               data={"resolution": "failed", "evidence": resolution.evidence,
+                                                     "run_state_updated": False})
+                else:
+                    pending["observations"] += 1
+                    if pending["observations"] < 2:
+                        if diagnostic_enabled:
+                            self.diagnostics.event("uncertain_transaction_waiting", frame_id=frame_id,
+                                                   action_id=pending["action_id"],
+                                                   data={"reason": resolution.reason,
+                                                         "observations": pending["observations"]})
+                        return {"elixir": elixir, "bought": [], "orbs": len(orbs),
+                                "units": units_before, "units_before": units_before,
+                                "roster": state.report(), "reason": "verification_pending"}
+                    pending["status"] = "unresolved"
+                    state.safe_mode = True
+                    if diagnostic_enabled:
+                        self.diagnostics.event("limited_mode_enabled", frame_id=frame_id,
+                                               action_id=pending["action_id"],
+                                               data={"reason": "purchase_remains_unknown",
+                                                     "copy_based_decisions": False,
+                                                     "roster_synchronized": False})
+            if state.sync_required and not state.safe_mode:
+                if diagnostic_enabled:
+                    self.diagnostics.event("purchase_blocked", frame_id=frame_id,
+                                           source="DeployPlanner.play",
+                                           data={"reason": "state_sync_required",
+                                                 "pending_transactions": len(state.uncertain_transactions)})
+                return {"elixir": elixir, "bought": [], "orbs": len(orbs), "units": units_before,
+                        "units_before": units_before, "roster": state.report(),
+                        "reason": "state_sync_required"}
         if diagnostic_enabled:
             self._record_state(screen, frame_id, elixir, elixir_certainty, None, None,
                                units_before, None, state, "deploy_initial_state")
 
-        bought = []
+        bought = resolved_buys
         reason = "done"
         for _ in range(max_buys):
             if screen is None or elixir is None:
@@ -263,13 +359,17 @@ class DeployPlanner:
                     screen = self._take_screenshot("shop_recognition_retry")
                     if screen is None:
                         continue
+                    captured_at = self._last_capture_at
                     frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
                     if self.verify_actions and self.reader.phase(screen) != "deploy":
                         reason = "phase_ended"
                         break
                     if self.verify_actions:
-                        elixir = self._read_elixir(screen)
-                        elixir_certainty = "observed" if elixir is not None else "unknown"
+                        refreshed_elixir = self._read_elixir(screen)
+                        if refreshed_elixir is not None:
+                            elixir = refreshed_elixir
+                            last_observed_elixir = refreshed_elixir
+                            elixir_certainty = "observed"
                     cards = self.reader.shop_cards(screen)
                     if cards:
                         break
@@ -294,9 +394,10 @@ class DeployPlanner:
             frame_id = self.diagnostics.record_frame(screen, reason="shop_decision") if diagnostic_enabled else None
             if diagnostic_enabled:
                 choice = self.choose(cards, elixir, state, action_id=action_id, frame_id=frame_id,
-                                     elixir_certainty=elixir_certainty)
+                                     elixir_certainty=elixir_certainty,
+                                     ignore_copies=bool(state.sync_required))
             else:
-                choice = self.choose(cards, elixir, state)
+                choice = self.choose(cards, elixir, state, ignore_copies=bool(state.sync_required))
             if choice is None:
                 reason = self._save_reason(cards, elixir, state)
                 logger.info(
@@ -308,6 +409,24 @@ class DeployPlanner:
             if self.verify_actions and self.reader.phase(screen) != "deploy":
                 reason = "phase_ended"
                 break
+
+            if self.verify_actions:
+                frame_age_ms = max(0, round((time.monotonic() - captured_at) * 1000))
+                if diagnostic_enabled:
+                    self.diagnostics.event("action_frame_age", frame_id=frame_id,
+                                           action_id=action_id, source="DeployPlanner.play",
+                                           data={"action": "purchase", "frame_age_ms": frame_age_ms,
+                                                 "max_frame_age_ms": round(self.max_frame_age_seconds * 1000),
+                                                 "stale": frame_age_ms > self.max_frame_age_seconds * 1000})
+                if frame_age_ms > self.max_frame_age_seconds * 1000:
+                    if diagnostic_enabled:
+                        self.diagnostics.event("action_discarded_stale", frame_id=frame_id,
+                                               action_id=action_id, source="DeployPlanner.play",
+                                               data={"action": "purchase", "frame_age_ms": frame_age_ms,
+                                                     "max_frame_age_ms": round(self.max_frame_age_seconds * 1000),
+                                                     "reason": "stale_observation"})
+                    reason = "stale_frame"
+                    break
 
             logger.info(f"[BUY] {choice.name} ({choice.cost}) -> {state.star(choice.name)}*")
             if dry_run:
@@ -327,6 +446,7 @@ class DeployPlanner:
                 continue
 
             elixir_before = elixir
+            transaction_start_elixir = elixir_before
             before_screen = screen
             before_frame_id = frame_id
             budget = VerificationBudget(VERIFY_ACTION_TIMEOUT_SECONDS) if self.verify_actions else None
@@ -381,23 +501,29 @@ class DeployPlanner:
             try:
                 screen = self._take_screenshot("after_buy", action_id,
                                                timeout=budget.remaining() if budget else None)
+                if screen is not None:
+                    captured_at = self._last_capture_at
             except Exception:
                 screen = None
             capture_duration_ms = round((time.monotonic() - capture_started) * 1000)
             frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
             recognition_started = time.monotonic()
             read = self._read_elixir(screen) if screen is not None else None
+            if read is not None:
+                last_observed_elixir = read
             if self.verify_actions:
                 after_cards = self.reader.shop_cards(screen) if screen is not None else []
                 before_observation = Observation(
                     phase=self.reader.phase(before_screen), elixir=elixir_before,
                     shop_cards=self._shop_signature(cards),
                     selected_slot=self._selected_signature(cards, choice),
+                    own_units=units_before,
                 )
                 after_observation = Observation(
                     phase=self.reader.phase(screen) if screen is not None else None,
                     elixir=read, shop_cards=self._shop_signature(after_cards),
                     selected_slot=self._selected_signature(after_cards, choice),
+                    own_units=self.reader.own_units(screen) if screen is not None else None,
                 )
                 result = self.action_verifier.verify_purchase(
                     action_id=action_id or f"local-{uuid.uuid4().hex}",
@@ -405,6 +531,7 @@ class DeployPlanner:
                     frame_before=before_frame_id, frame_after=frame_id,
                     before=before_observation, after=after_observation, cost=choice.cost,
                     started_at=verification_started,
+                    allow_unit_count=not state.safe_mode,
                 )
                 recognition_duration_ms = round((time.monotonic() - recognition_started) * 1000)
                 if result.status is ActionStatus.UNKNOWN:
@@ -415,12 +542,16 @@ class DeployPlanner:
                         try:
                             screen = self._take_screenshot("verification_recheck", action_id,
                                                            timeout=budget.remaining())
+                            if screen is not None:
+                                captured_at = self._last_capture_at
                         except Exception:
                             screen = None
                         capture_duration_ms += round((time.monotonic() - recheck_capture_started) * 1000)
                         frame_id = self.diagnostics.frame_id(screen) if diagnostic_enabled else None
                         recheck_recognition_started = time.monotonic()
                         read = self._read_elixir(screen) if screen is not None else None
+                        if read is not None:
+                            last_observed_elixir = read
                         after_cards = self.reader.shop_cards(screen) if screen is not None else []
                         after_observation = Observation(
                             phase=self.reader.phase(screen) if screen is not None else None,
@@ -435,6 +566,7 @@ class DeployPlanner:
                             frame_before=before_frame_id, frame_after=frame_id,
                             before=before_observation, after=after_observation, cost=choice.cost,
                             started_at=verification_started, rechecks=recheck + 1,
+                              allow_unit_count=not state.safe_mode,
                         )
                         if result.status is not ActionStatus.UNKNOWN:
                             break
@@ -449,11 +581,35 @@ class DeployPlanner:
                         },
                     )
                 if result.status is not ActionStatus.CONFIRMED:
+                    transaction_status = result.status.value
                     if result.status in (ActionStatus.UNKNOWN, ActionStatus.INTERRUPTED):
                         state.sync_required = True
                     reason = "verification_" + result.status.value.lower()
+                    if result.status is ActionStatus.UNKNOWN:
+                        state.uncertain_transactions.append({
+                            "action_id": result.action_id,
+                            "name": choice.name,
+                            "cost": choice.cost,
+                            "frame_id": before_frame_id,
+                            "before": before_observation,
+                            "choice": choice,
+                            "observations": 0,
+                            "status": "pending",
+                        })
+                        reason = "verification_pending"
+                        if diagnostic_enabled:
+                            self.diagnostics.event("uncertain_transaction_saved", frame_id=frame_id,
+                                                   action_id=result.action_id,
+                                                   data={"name": choice.name, "cost": choice.cost,
+                                                         "observed_elixir": read,
+                                                         "run_state_updated": False,
+                                                         "same_action_retry_allowed": False})
+                    if read is not None:
+                        elixir = read
+                        elixir_certainty = "observed"
                     break
                 state.buy(choice.name, action_id=result.action_id)
+                transaction_status = result.status.value
                 bought.append(choice.name)
                 elixir = read
                 elixir_certainty = "observed"
@@ -512,8 +668,18 @@ class DeployPlanner:
 
         units_after = self.reader.own_units(screen) if screen is not None else 0
         if diagnostic_enabled:
-            self._record_state(screen, self.diagnostics.frame_id(screen), elixir, elixir_certainty,
-                               None, None, None, units_after, state, "deploy_final_state")
+            balance_details = {
+                "last_observed": {"value": last_observed_elixir,
+                                   "certainty": "observed" if last_observed_elixir is not None else "unknown"},
+                "calculated": None,
+                "transaction_start": {"value": transaction_start_elixir,
+                                      "certainty": "observed" if transaction_start_elixir is not None else "unknown"},
+                "transaction_confirmation": transaction_status,
+            }
+            self._record_state(screen, self.diagnostics.frame_id(screen), last_observed_elixir,
+                               "observed" if last_observed_elixir is not None else elixir_certainty,
+                               None, None, None, units_after, state, "deploy_final_state",
+                               balance_details=balance_details if self.verify_actions else None)
         summary = {
             "elixir": elixir,
             "bought": bought,
@@ -523,6 +689,11 @@ class DeployPlanner:
             "roster": state.report(),
             "reason": reason,
         }
+        if self.verify_actions:
+            summary.update({"elixir_observed": last_observed_elixir,
+                            "elixir_calculated": None,
+                            "transaction_start_elixir": transaction_start_elixir,
+                            "transaction_confirmation": transaction_status})
         logger.info(
             f"[DEPLOY] bought {bought or 'nothing'} | elixir left {elixir} ({reason}) | "
             f"units {units_before}->{units_after} | roster: {state.report()}"
@@ -536,9 +707,12 @@ class DeployPlanner:
         capture = (lambda: self.adb.screenshot(timeout=5 if timeout is None else timeout)) \
             if self.verify_actions else self.adb.screenshot
         if not self._diagnostics_enabled():
-            return capture()
+            shot = capture()
+            self._last_capture_at = time.monotonic() if shot is not None else None
+            return shot
         try:
             shot = capture()
+            self._last_capture_at = time.monotonic() if shot is not None else None
         except Exception as exc:
             self.diagnostics.event("screenshot_error", action_id=action_id,
                                    source="DeployPlanner.play",
@@ -550,7 +724,8 @@ class DeployPlanner:
         return shot
 
     def _record_state(self, screen, frame_id, elixir, elixir_certainty,
-                      cards, orbs, units_before, units_after, state, source):
+                      cards, orbs, units_before, units_after, state, source,
+                      balance_details=None):
         if not self._diagnostics_enabled():
             return
         card_records = None
@@ -567,27 +742,34 @@ class DeployPlanner:
                 "name_inliers": getattr(card, "name_inliers", None),
                 "certainty": "observed",
             } for card in cards]
+        run_state = {"copies": dict(state.copies),
+                     "purchases": list(state.purchases),
+                     "distinct_kinds": len(state.copies),
+                     "calculated_stars": {name: state.star(name) for name in state.copies},
+                     "certainty": "inferred"}
+        if self.verify_actions:
+            run_state.update({"accounting_mode": ("limited" if state.safe_mode else
+                                                   "unsynchronized" if state.sync_required
+                                                   else "tracked"),
+                              "uncertain_transactions": len(state.uncertain_transactions),
+                              "roster_synchronized": not state.sync_required})
+        data = {"snapshot_source": source,
+                "screen_available": screen is not None,
+                "elixir": {"value": elixir, "certainty": elixir_certainty},
+                "shop_cards": card_records,
+                "orbs": {"coordinates": [list(p) for p in orbs],
+                         "certainty": "observed"} if orbs is not None else None,
+                "own_units": {
+                    "before": {"value": units_before, "certainty": "approximate"}
+                    if units_before is not None else None,
+                    "after": {"value": units_after, "certainty": "approximate"}
+                    if units_after is not None else None,
+                },
+                "run_state": run_state}
+        if self.verify_actions:
+            data["balance_details"] = balance_details
         self.diagnostics.event("state_snapshot", frame_id=frame_id,
-                               source="DeployPlanner.play",
-                               data={"snapshot_source": source,
-                                     "screen_available": screen is not None,
-                                     "elixir": {"value": elixir, "certainty": elixir_certainty},
-                                     "shop_cards": card_records,
-                                     "orbs": {"coordinates": [list(p) for p in orbs],
-                                              "certainty": "observed"} if orbs is not None else None,
-                                     "own_units": {
-                                         "before": {"value": units_before, "certainty": "approximate"}
-                                         if units_before is not None else None,
-                                         "after": {"value": units_after, "certainty": "approximate"}
-                                         if units_after is not None else None,
-                                     },
-                                     "run_state": {"copies": dict(state.copies),
-                                                   "purchases": list(state.purchases),
-                                                   "distinct_kinds": len(state.copies),
-                                                   "calculated_stars": {
-                                                       name: state.star(name) for name in state.copies
-                                                   },
-                                                   "certainty": "inferred"}})
+                               source="DeployPlanner.play", data=data)
 
     def _record_upgrade(self, name, copies_before, star_before, state, frame_id, action_id):
         if not self._diagnostics_enabled():

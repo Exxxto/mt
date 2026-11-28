@@ -70,6 +70,57 @@ class ActionVerifierTests(unittest.TestCase):
         )
         self.assertEqual(result.status, ActionStatus.UNKNOWN)
 
+    def test_full_elixir_spend_and_increased_unit_count_confirms_with_unrecognized_shop(self):
+        result = self.verifier.verify_purchase(
+            action_id="a_units", adb_status="succeeded", frame_before=9, frame_after=10,
+            before=Observation(phase="deploy", elixir=5, shop_cards=((0, "mega_knight", 5),),
+                               own_units=1),
+            after=Observation(phase="deploy", elixir=0, shop_cards=None, own_units=2),
+            cost=5,
+        )
+        self.assertEqual(result.status, ActionStatus.CONFIRMED)
+        self.assertIn("own_unit_count_increased", result.evidence)
+
+    def test_shop_change_without_matching_elixir_is_not_a_purchase(self):
+        result = self.verifier.verify_purchase(
+            action_id="a_shop", adb_status="succeeded", frame_before=1, frame_after=2,
+            before=Observation(phase="deploy", elixir=5, shop_cards=((0, "knight", 2),)),
+            after=Observation(phase="deploy", elixir=4, shop_cards=((0, "archer", 1),)),
+            cost=2,
+        )
+        self.assertEqual(result.status, ActionStatus.UNKNOWN)
+
+    def test_unit_increase_without_expected_elixir_delta_is_not_a_purchase(self):
+        result = self.verifier.verify_purchase(
+            action_id="a_units_only", adb_status="succeeded", frame_before=1, frame_after=2,
+            before=Observation(phase="deploy", elixir=5, own_units=1),
+            after=Observation(phase="deploy", elixir=3, own_units=2), cost=1,
+        )
+        self.assertEqual(result.status, ActionStatus.UNKNOWN)
+
+    def test_unchanged_balance_with_unit_increase_is_conflicting_not_failed(self):
+        observation = Observation(phase="deploy", elixir=5,
+                                  shop_cards=((0, "knight", 2),),
+                                  selected_slot=(0, ("knight", 2)), own_units=1)
+        after = Observation(phase="deploy", elixir=5,
+                            shop_cards=((0, "knight", 2),),
+                            selected_slot=(0, ("knight", 2)), own_units=2)
+        result = self.verifier.verify_purchase(
+            action_id="a_conflict", adb_status="succeeded", frame_before=1, frame_after=2,
+            before=observation, after=after, cost=2,
+        )
+        self.assertEqual(result.status, ActionStatus.UNKNOWN)
+
+    def test_contradictory_shop_unchanged_and_no_elixir_spend_is_failed(self):
+        observation = Observation(phase="deploy", elixir=5,
+                                  shop_cards=((0, "knight", 2),),
+                                  selected_slot=(0, ("knight", 2)), own_units=1)
+        result = self.verifier.verify_purchase(
+            action_id="a_noop", adb_status="succeeded", frame_before=1, frame_after=2,
+            before=observation, after=observation, cost=2,
+        )
+        self.assertEqual(result.status, ActionStatus.FAILED)
+
     def test_same_slot_index_with_new_card_content_confirms_change(self):
         result = self.verifier.verify_purchase(
             action_id="a8", adb_status="succeeded", frame_before=1, frame_after=2,

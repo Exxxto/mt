@@ -1,42 +1,50 @@
-# Stage 3: action verification and state consistency
+# Stage 3: action verification, freshness and recovery
 
-## Purchase verification
+## Purchase evidence
 
-`core/action_verifier.py` compares visible observations from one frame before and one frame after a purchase. An observation groups phase, recognized elixir, recognized shop cards, and the contents of the selected slot. An incomplete shop is unknown; it is not evidence that the assortment changed or stayed the same. A selected-slot change requires the same recognized slot index with different recognized card contents.
+`core/action_verifier.py` compares phase, visible elixir, the complete recognized shop, the selected slot, and the approximate own-unit count before and after a purchase. It does not use arbitrary image pixel differences.
 
-- `CONFIRMED`: deploy continued, the visible elixir delta equals the selected card cost, and the complete shop or selected slot visibly changed.
-- `FAILED`: deploy continued, the visible balance is unchanged, and both the complete shop and selected slot are visibly unchanged.
-- `UNKNOWN`: observations are missing or conflict, or ADB failed without enough visual evidence to decide whether the tap took effect.
-- `INTERRUPTED`: the post-action observation shows deploy ended or its phase is unknown.
+- `CONFIRMED`: deploy remains visible, the observed elixir drop equals the selected card's cost, and at least one independent state change agrees: a complete shop assortment changed, the selected slot changed, or approximate own-unit count increased.
+- `FAILED`: deploy remains visible, elixir did not change, and the complete shop and selected slot are both recognized and unchanged.
+- `UNKNOWN`: evidence is incomplete or conflicts. Unit count is corroborating evidence only; a decrease or unchanged count does not disprove a merge. In limited mode unit count is ignored.
+- `INTERRUPTED`: deploy ended or the phase became unrecognizable during verification.
 
-ADB process status and game outcome are recorded separately. A timeout or transport exception does not prove that no tap reached the game. In verify mode an unknown/interrupted result ends the current buy chain and marks `RunState.sync_required`. Later rounds cannot use that state for purchases; it is cleared only when a new match initializes a new `RunState`. Confirmed actions update the roster once by `action_id`; unknown actions do not.
+An exact balance spend plus an increased unit count can confirm a purchase while zero elixir dims the cards and prevents name recognition. A changed shop or slot alone cannot confirm a purchase without the expected balance change. ADB status remains separate from game confirmation.
 
-## Fresh observations and bounded work
+## Pending transactions and limited play
 
-Verify mode checks phase before a tap and after every newly captured frame while waiting for elixir or shop recognition. Shop cards and elixir used in a decision come from the same frame. A shop retry that sees another phase stops without tapping.
+Confirmed purchases update `RunState` once by action ID. Unknown transactions are stored separately and do not alter copies, stars or purchase history. The same transaction is never tapped twice. Two later fresh observations get a chance to resolve it from the original balance and shop state; a confirmed resolution is applied once, while a fully visible no-effect result resolves as failed.
 
-Each purchase and its single optional recheck share an eight-second monotonic budget. Tap, screenshot capture, and deliberate delay use the remaining budget; an expired budget prevents another capture. CPU-based image recognition cannot be forcibly interrupted, so unusually slow recognition may finish after the deadline, but it cannot trigger an additional recheck after expiration. Pull-mode screenshot capture, download, and remote cleanup share the caller's timeout. Cleanup is skipped when the budget has expired.
+If those observations still conflict, the planner marks the roster unsynchronized and enters limited mode. It continues from fresh, recognized phase, balance and shop data, but ignores copy counts when choosing cards. Each new purchase still needs the expected elixir drop plus a changed slot or shop to be confirmed. Unknown purchases remain outside `RunState`; no blind sale or full roster-sync claim is made. Buying remains blocked when phase, balance, affordability or shop cards cannot be read, or while a pending transaction is still within its resolution window. Limited mode ends only with a new match reset; board and bench recognition are not part of Stage 3.
 
-After orb taps, the bot requires a fresh screenshot before it makes another phase or purchase decision. If capture fails, the loop drops the old frame and retries from a new capture. `MergeTacticsBot.collect_orbs` remains the only component that taps orbs.
+## Fresh frames and pauses
 
-The legacy mode remains the default and retains its existing purchase accounting. Verify mode does not invoke the legacy sale fallback, so an uncertain purchase cannot trigger a sale. No board or bench recognition is added; synchronization recovery from an unknown result remains out of scope.
+Verify mode timestamps each received frame with `time.monotonic()`. The default maximum age is 3 seconds and can be configured with `--max-frame-age SECONDS`. Before a purchase, orb, match-search or end-screen tap, a stale observation is discarded; no old coordinates are sent. The next loop obtains a new frame and repeats phase, balance, shop and action recognition. Screenshots acquired during retries receive their own new timestamp.
 
-## Diagnostics and compatibility
+The threshold was compared with offline MuMuPlayer recordings. The new verify session's two post-action frame captures took 1,188 and 1,219 ms; a 3-second limit leaves about 2.5 times that measured capture duration for recognition and tapping. The previous legacy recording's frame-event spacing had a 1,407 ms median and 3,889 ms 95th percentile. It had no gaps over 30 seconds. The new verify recording had two long gaps: 62,016 ms and 34,985 ms. The limit rejects both stale action opportunities while allowing ordinary post-action capture latency. Regression tests exercise 35- and 62-second observations. Long iteration pauses of at least 5 seconds are recorded.
 
-The verifier result includes action type and ID, ADB status, frame IDs, before/after observations, evidence, reason, elapsed time, and recheck count. Existing schema version 1 recordings remain readable. The analyzer keeps verified outcomes distinct from legacy inferred purchases. The existing diagnostics storage cap still applies to both events and frames; when exhausted, recording continues to drop later data.
+## Diagnostics
 
-## Run and manually inspect
+`session_started.strategy` reports `verify_actions` when that mode is enabled. Action diagnostics include frame age and limit, stale-action discard, purchase-block reason, pending-transaction resolution, limited-mode entry and long pauses. Final balance snapshots separate the latest observed balance, a calculated balance (null in verify mode when none was calculated), the transaction's starting balance, and the transaction status. Roster snapshots label limited and unsynchronized state explicitly.
 
-Run the automatic tests with:
+## Offline evidence
+
+Original frames 9–13 from `session-608c2f9560f6460db9526b242bbcd475` were inspected visually and run through the existing recognizer offline. Frame 9 reads 5 elixir, has three recognized cards, and shows one own unit. Frame 10 reads 0 elixir, has two own units, and only one of three cards is recognized. Frames 11–13 continue the deploy countdown and no card names are recognized. The average grayscale brightness of the three card tiles drops from 123/97/105 in frame 9 to 69/64/76 in frame 10 and stays lower through frame 13, consistent with the visible dimming at zero elixir. The purchase animation and dimming overlap, so the images do not isolate which one caused recognition loss; the established failure is the incomplete shop signature. The verifier does not use brightness or arbitrary pixel changes as purchase evidence. Expected 5-elixir spend plus the independent unit increase from 1 to 2 confirms this transaction.
+
+The new session had 347 events, 2 purchase attempts, 0 confirmed purchases and 2 UNKNOWN results. Its latest prior legacy session had 335 events and 5 legacy purchase attempts. Offline analysis reads the recordings only and never taps the game.
+
+## Run
+
+Existing tests plus Stage 3 regressions:
 
 ```powershell
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-For a manual check, start with the game already open:
+Verify mode, with the game already open:
 
 ```powershell
-.venv\Scripts\python.exe bot.py --no-search --verify-actions --record-frames
+.venv\Scripts\python.exe bot.py --no-search --verify-actions --record-frames --max-frame-age 3
 ```
 
-Inspect each `buy_attempt` alongside its `action_verification_result`. A confirmed transaction updates `RunState` once; an unknown or interrupted result ends buying and requires a new match before the state is trusted again. This procedure sends game input. No live match or game taps were used for the automated checks in this stage.
+No real match was run for this change. Strategy ranking, tier lists, economy policy, round handling, match resets, orb ownership and automatic match restart remain unchanged.

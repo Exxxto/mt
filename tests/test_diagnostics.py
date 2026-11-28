@@ -503,11 +503,11 @@ class FakeADB:
         self.taps = []
         self.screenshots = 0
 
-    def screenshot(self):
+    def screenshot(self, timeout=None):
         self.screenshots += 1
         return next(self.screens, None)
 
-    def tap(self, x, y):
+    def tap(self, x, y, **kwargs):
         self.taps.append((x, y))
 
 
@@ -562,6 +562,77 @@ class ActionDiagnosticsTests(unittest.TestCase):
         refusal = next(event for event in self._events(diag) if event["event_type"] == "purchase_refused")
         self.assertEqual(refusal["data"]["reason"], "unknown_elixir")
         self.assertIsNone(refusal["data"]["recognized_elixir"])
+
+    def test_final_snapshot_separates_observed_and_calculated_balance(self):
+        _temp, diag = self._session()
+        initial, after = FakeFrame(5), FakeFrame(3)
+        before_cards = [ShopCard("knight", 2, SHOP_CENTERS[0]),
+                        ShopCard("goblin", 1, SHOP_CENTERS[1]),
+                        ShopCard("archer", 1, SHOP_CENTERS[2])]
+        after_cards = [ShopCard("archer", 1, SHOP_CENTERS[0]),
+                       ShopCard("goblin", 1, SHOP_CENTERS[1]),
+                       ShopCard("knight", 2, SHOP_CENTERS[2])]
+        reader = FakeReader(before_cards)
+        reader.shop_cards = lambda frame: before_cards if frame is initial else after_cards
+        adb = FakeADB([after])
+        planner = DeployPlanner(reader, adb, diagnostics=diag, verify_actions=True)
+        reader.phase = lambda _frame: "deploy"
+        reader.own_units = lambda _frame: 1
+
+        with patch("core.strategy.time.sleep"):
+            planner.play(initial, RunState(), max_buys=1)
+        final_state = next(event["data"] for event in self._events(diag)
+                           if event["event_type"] == "state_snapshot"
+                           and event["data"]["snapshot_source"] == "deploy_final_state")
+
+        self.assertEqual(final_state["elixir"]["value"], 3)
+        self.assertEqual(final_state["balance_details"]["last_observed"]["value"], 3)
+        self.assertIsNone(final_state["balance_details"]["calculated"])
+        self.assertEqual(final_state["balance_details"]["transaction_start"]["value"], 5)
+
+    def test_unknown_purchase_final_snapshot_keeps_spent_balance_and_unknown_status(self):
+        _temp, diag = self._session()
+        initial, after, recheck = FakeFrame(5), FakeFrame(0), FakeFrame(0)
+        cards = [ShopCard("knight", 2, SHOP_CENTERS[0]),
+                 ShopCard("goblin", 1, SHOP_CENTERS[1]),
+                 ShopCard("archer", 1, SHOP_CENTERS[2])]
+        reader = FakeReader(cards)
+        reader.shop_cards = lambda _frame: cards
+        reader.phase = lambda _frame: "deploy"
+        reader.own_units = lambda _frame: 1
+        planner = DeployPlanner(reader, FakeADB([after, recheck]), diagnostics=diag,
+                                verify_actions=True)
+
+        with patch("core.strategy.time.sleep"):
+            planner.play(initial, RunState(), max_buys=1)
+        final_state = next(event["data"] for event in self._events(diag)
+                           if event["event_type"] == "state_snapshot"
+                           and event["data"]["snapshot_source"] == "deploy_final_state")
+
+        self.assertEqual(final_state["elixir"]["value"], 0)
+        self.assertEqual(final_state["balance_details"]["last_observed"]["value"], 0)
+        self.assertEqual(final_state["balance_details"]["transaction_start"]["value"], 5)
+        self.assertEqual(final_state["balance_details"]["transaction_confirmation"], "UNKNOWN")
+        self.assertIsNone(final_state["balance_details"]["calculated"])
+
+    def test_session_started_reports_verify_actions_strategy(self):
+        class StopLoop(BaseException):
+            pass
+
+        _temp, diag = self._session()
+        bot = MergeTacticsBot.__new__(MergeTacticsBot)
+        bot.diagnostics = diag
+        bot.verify_actions = True
+        bot.max_frame_age_seconds = 3.0
+        bot.adb = unittest.mock.Mock()
+        bot.adb.screenshot.side_effect = StopLoop()
+
+        with self.assertRaises(StopLoop):
+            bot.run(auto_search=False)
+
+        started = next(event for event in self._events(diag)
+                       if event["event_type"] == "session_started")
+        self.assertEqual(started["data"]["strategy"], "verify_actions")
 
         _, diag2 = self._session()
         planner = DeployPlanner(FakeReader([]), FakeADB([FakeFrame(2)] * 5), diagnostics=diag2)
@@ -712,7 +783,8 @@ class ActionDiagnosticsTests(unittest.TestCase):
         bot.handle_end_screen = lambda _screen: False
         bot.search_match = lambda _screen: False
 
-        fake_time = SimpleNamespace(time=unittest.mock.Mock(side_effect=[0, 0, 2]), sleep=lambda _: None)
+        fake_time = SimpleNamespace(time=unittest.mock.Mock(side_effect=[0, 0, 2]),
+                                    monotonic=lambda: 0, sleep=lambda _: None)
         with patch("bot.time", fake_time):
             bot.run(duration=1)
         diag.close("test")
@@ -852,6 +924,21 @@ class DiagnosticsCLITests(unittest.TestCase):
         bot_class.assert_called_once_with(diagnostics=diag)
         bot_class.return_value.run.assert_called_once_with(auto_search=False, duration=45.0)
         diag.close.assert_called_once_with("normal")
+
+    def test_verify_actions_uses_correct_session_strategy_and_frame_limit(self):
+        diag = unittest.mock.Mock(enabled=True)
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(sys, "argv", ["bot.py", "--verify-actions", "--diagnostics",
+                                            "--max-frame-age", "4.5", "--diagnostics-dir", temp]), \
+                patch("bot.DiagnosticsSession.create", return_value=diag) as create_session, \
+                patch("bot.MergeTacticsBot") as bot_class:
+            bot.main()
+
+        metadata = create_session.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["strategy"], "verify_actions")
+        self.assertEqual(metadata["parameters"]["max_frame_age_seconds"], 4.5)
+        bot_class.assert_called_once_with(diagnostics=diag, verify_actions=True,
+                                          max_frame_age_seconds=4.5)
 
     def test_diagnostics_init_error_warns_and_keeps_bot_running(self):
         with patch.object(sys, "argv", ["bot.py", "--diagnostics"]), \

@@ -106,6 +106,16 @@ class DeployPlannerChoiceTests(unittest.TestCase):
 
         self.assertIs(self.planner.choose([non_target], 5, state), non_target)
 
+    def test_safe_mode_does_not_use_uncertain_copy_counts(self):
+        state = RunState(copies={"goblin": 1})
+        target = card("knight", 3)
+        apparent_duplicate = card("goblin", 1)
+
+        selected = self.planner.choose([apparent_duplicate, target], 5, state,
+                                       ignore_copies=True)
+
+        self.assertIs(selected, target)
+
 
 class RunStateTests(unittest.TestCase):
     def test_initial_state_has_no_copies_or_purchases(self):
@@ -306,6 +316,56 @@ class DeployPlannerExecutionTests(unittest.TestCase):
         self.assertEqual(state.copies, {"knight": 1})
 
     @patch("core.strategy.time.sleep")
+    def test_full_spend_and_unit_increase_confirm_when_shop_is_unrecognized(self, _sleep):
+        from core.adb_controller import ADBActionResult
+
+        initial, updated = object(), object()
+        planner, reader, adb, _ip = self.planner(
+            frames=[updated], elixir_by_frame={initial: 5, updated: 0},
+            cards_by_frame={initial: [card("mega_knight", 5)], updated: []},
+        )
+        reader.own_units = lambda frame: 1 if frame is initial else 2
+        reader.phase = lambda _frame: "deploy"
+        planner.verify_actions = True
+        planner.adb.tap = lambda *args, **kwargs: (
+            adb.taps.append(args) or ADBActionResult("succeeded", 0, 1)
+        )
+        state = RunState()
+
+        result = planner.play(initial, state)
+
+        self.assertEqual(result["bought"], ["mega_knight"])
+        self.assertEqual(state.copies, {"mega_knight": 1})
+        self.assertEqual(adb.taps, [(100, 100)])
+
+    @patch("core.strategy.time.sleep")
+    def test_stale_purchase_frame_is_discarded_without_tapping(self, _sleep):
+        import time
+        from core.adb_controller import ADBActionResult
+
+        stale, fresh, after = object(), object(), object()
+        planner, _reader, adb, _ip = self.planner(
+            frames=[after], elixir_by_frame={stale: 5, fresh: 5, after: 3},
+            cards_by_frame={stale: [card("knight", 2)], fresh: [card("knight", 2)],
+                            after: [card("archer", 1)]},
+        )
+        _reader.phase = lambda _frame: "deploy"
+        _reader.own_units = lambda frame: 2 if frame in (stale, fresh) else 3
+        planner.verify_actions = True
+        planner.max_frame_age_seconds = 3
+        planner.adb.tap = lambda *args, **kwargs: (
+            adb.taps.append(args) or ADBActionResult("succeeded", 0, 1)
+        )
+
+        state = RunState()
+        stale_result = planner.play(stale, state, captured_at=time.monotonic() - 35)
+        fresh_result = planner.play(fresh, state, max_buys=1, captured_at=time.monotonic())
+
+        self.assertEqual(stale_result["reason"], "stale_frame")
+        self.assertEqual(fresh_result["bought"], ["knight"])
+        self.assertEqual(adb.taps, [(100, 100)])
+
+    @patch("core.strategy.time.sleep")
     def test_verify_mode_unknown_result_does_not_buy_or_sell(self, _sleep):
         from core.adb_controller import ADBActionResult
 
@@ -368,10 +428,103 @@ class DeployPlannerExecutionTests(unittest.TestCase):
 
         result = planner.play(initial, state)
 
-        self.assertEqual(result["reason"], "verification_unknown")
+        self.assertEqual(result["reason"], "verification_pending")
         self.assertEqual(state.copies, {})
         self.assertTrue(state.sync_required)
         self.assertEqual(adb.taps, [(100, 100)])
+
+    @patch("core.strategy.time.sleep")
+    def test_later_reliable_observation_resolves_pending_purchase_once(self, _sleep):
+        from core.adb_controller import ADBActionResult
+
+        initial, after, recheck, fresh = object(), object(), object(), object()
+        original = [ShopCard("knight", 2, (100, 100), slot_index=0),
+                    ShopCard("goblin", 1, (200, 100), slot_index=1),
+                    ShopCard("archer", 1, (300, 100), slot_index=2)]
+        changed = [ShopCard("archer", 1, (100, 100), slot_index=0),
+                   ShopCard("goblin", 1, (200, 100), slot_index=1),
+                   ShopCard("knight", 2, (300, 100), slot_index=2)]
+        planner, reader, adb, _ip = self.planner(
+            frames=[after, recheck],
+            elixir_by_frame={initial: 5, after: None, recheck: None, fresh: 3},
+            cards_by_frame={initial: original, after: [], recheck: [], fresh: changed},
+        )
+        reader.phase = lambda _frame: "deploy"
+        planner.verify_actions = True
+        planner.adb.tap = lambda *args, **kwargs: (
+            adb.taps.append(args) or ADBActionResult("succeeded", 0, 1)
+        )
+        state = RunState()
+
+        first = planner.play(initial, state)
+        second = planner.play(fresh, state, max_buys=0)
+
+        self.assertEqual(first["bought"], [])
+        self.assertEqual(second["reason"], "done")
+        self.assertEqual(state.copies, {"knight": 1})
+        self.assertEqual(state.purchases, ["knight"])
+        self.assertFalse(state.sync_required)
+        self.assertEqual(adb.taps, [(100, 100)])
+
+    @patch("core.strategy.time.sleep")
+    def test_unknown_purchase_keeps_last_observed_balance_in_final_result(self, _sleep):
+        initial, after, recheck = object(), object(), object()
+        planner, reader, adb, _ip = self.planner(
+            frames=[after, recheck], elixir_by_frame={initial: 5, after: 0, recheck: 0},
+            cards_by_frame={initial: [card("knight", 2)], after: [], recheck: []},
+        )
+        reader.phase = lambda _frame: "deploy"
+        planner.verify_actions = True
+        planner.adb.tap = lambda *args, **kwargs: adb.taps.append(args)
+        state = RunState()
+
+        result = planner.play(initial, state)
+
+        self.assertEqual(result["elixir"], 0)
+        self.assertEqual(state.copies, {})
+        self.assertEqual(adb.taps, [(100, 100)])
+
+    @patch("core.strategy.time.sleep")
+    def test_unresolved_purchase_enters_limited_mode_without_copy_based_choices(self, _sleep):
+        from core.adb_controller import ADBActionResult
+
+        initial, after, recheck, fresh1, fresh2, fresh3, after_safe = [object() for _ in range(7)]
+        original = [ShopCard("knight", 2, (100, 100), slot_index=0),
+                    ShopCard("goblin_cage", 1, (200, 100), slot_index=1),
+                    ShopCard("archer", 1, (300, 100), slot_index=2)]
+        changed = [ShopCard("dark_prince", 2, (100, 100), slot_index=0),
+                   ShopCard("goblin_cage", 1, (200, 100), slot_index=1),
+                   ShopCard("boss_bandit", 3, (300, 100), slot_index=2)]
+        rerolled = [ShopCard("dark_prince", 2, (100, 100), slot_index=0),
+                    ShopCard("knight", 2, (200, 100), slot_index=1),
+                    ShopCard("archer", 1, (300, 100), slot_index=2)]
+        planner, reader, adb, _ip = self.planner(
+            frames=[after, recheck, after_safe],
+            elixir_by_frame={initial: 5, after: 4, recheck: 4, fresh1: 5, fresh2: 5,
+                             fresh3: 5, after_safe: 2},
+            cards_by_frame={initial: original, after: [], recheck: [], fresh1: changed,
+                            fresh2: changed, fresh3: changed, after_safe: rerolled},
+        )
+        reader.phase = lambda _frame: "deploy"
+        reader.own_units = lambda _frame: 2
+        planner.verify_actions = True
+        planner.adb.tap = lambda *args, **kwargs: (
+            adb.taps.append(args) or ADBActionResult("succeeded", 0, 1)
+        )
+        state = RunState(copies={"knight": 1})
+
+        first = planner.play(initial, state)
+        second = planner.play(fresh1, state)
+        third = planner.play(fresh2, state, max_buys=0)
+        fourth = planner.play(fresh3, state, max_buys=1)
+
+        self.assertEqual(first["reason"], "verification_pending")
+        self.assertEqual(second["reason"], "verification_pending")
+        self.assertTrue(state.safe_mode)
+        self.assertTrue(state.sync_required)
+        self.assertEqual(fourth["bought"], ["boss_bandit"])
+        self.assertEqual(state.copies, {"knight": 1, "boss_bandit": 1})
+        self.assertEqual(adb.taps, [(100, 100), (300, 100)])
 
     @patch("core.strategy.time.sleep")
     def test_verify_mode_refuses_unknown_phase_before_tapping(self, _sleep):
@@ -537,6 +690,23 @@ class BotLoopTests(unittest.TestCase):
 
         bot.game_logic.phase.assert_called_once_with("old-frame")
         bot.handle_deploy_phase.assert_not_called()
+
+    def test_stale_orb_observation_is_not_tapped(self):
+        import time
+
+        bot = MergeTacticsBot.__new__(MergeTacticsBot)
+        bot.adb = Mock()
+        bot.adb.screenshot.return_value = "fresh-frame"
+        bot.game_logic = Mock()
+        bot.game_logic.reader.orbs.return_value = [(10, 20)]
+        bot.diagnostics = None
+        bot.verify_actions = True
+        bot.max_frame_age_seconds = 3
+
+        refreshed = bot.collect_orbs("stale-frame", captured_at=time.monotonic() - 62)
+
+        self.assertEqual(refreshed, "fresh-frame")
+        bot.adb.tap.assert_not_called()
 
     def test_deploy_and_battle_frames_follow_the_existing_branches(self):
         bot = MergeTacticsBot.__new__(MergeTacticsBot)

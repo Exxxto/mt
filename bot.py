@@ -11,6 +11,7 @@ results screen, forever. No GUI.
 """
 
 import argparse
+import math
 import platform
 import subprocess
 import time
@@ -44,8 +45,18 @@ def positive_int(value):
         parsed = int(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be a positive integer") from exc
-    if parsed <= 0:
+    if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def positive_seconds(value):
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be positive seconds") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive seconds")
     return parsed
 
 
@@ -77,6 +88,7 @@ def _diagnostics_metadata(args):
             "duration_seconds": args.duration,
             "diagnostics_max_mb": args.diagnostics_max_mb,
             "verify_actions": getattr(args, "verify_actions", False),
+            "max_frame_age_seconds": getattr(args, "max_frame_age", 3.0),
         },
     }
 
@@ -87,12 +99,16 @@ def diagnostics_enabled(bot):
 
 
 class MergeTacticsBot:
-    def __init__(self, diagnostics=None, verify_actions=False):
+    def __init__(self, diagnostics=None, verify_actions=False, max_frame_age_seconds=3.0):
         self.diagnostics = diagnostics
         self.adb = ADBController(ADB_PATH)
         self.image_processor = ImageProcessor()
         self.game_logic = GameLogic(self.adb, self.image_processor, diagnostics=diagnostics,
-                                    verify_actions=verify_actions)
+                                    verify_actions=verify_actions,
+                                    max_frame_age_seconds=max_frame_age_seconds)
+        self.verify_actions = verify_actions
+        self.max_frame_age_seconds = max_frame_age_seconds
+        self._current_frame_captured_at = None
         self.last_elixir_value = 0
         self._deploy_played = False
         self._last_deploy_ts = 0.0
@@ -102,6 +118,9 @@ class MergeTacticsBot:
         """Press the lobby 'Batalla' button to start a match"""
         pos = self.image_processor.find_template(screen, SEARCH_BUTTON, SEARCH_THRESHOLD)
         if not pos:
+            return False
+        if self._record_action_age("match_search", screen):
+            self._record_stale_tap("match_search", screen)
             return False
         logger.info(f"[SEARCH] pressing Batalla at {pos}")
         action_id = None
@@ -141,6 +160,9 @@ class MergeTacticsBot:
             pos = self.image_processor.find_template(screen, END_BUTTONS[name], END_BUTTON_THRESHOLD)
             if not pos:
                 continue
+            if self._record_action_age("end_screen", screen):
+                self._record_stale_tap("end_screen", screen)
+                return False
             logger.info(f"[END] tapping {name} at {pos}")
             action_id = None
             if diagnostics_enabled(self):
@@ -178,7 +200,7 @@ class MergeTacticsBot:
             return True
         return False
 
-    def handle_deploy_phase(self, screen):
+    def handle_deploy_phase(self, screen, captured_at=None):
         """Pop the orbs, then buy and merge; returns the planner summary"""
         now = time.time()
         # Rounds are ~25s apart; a much longer gap means a new match started.
@@ -191,14 +213,17 @@ class MergeTacticsBot:
             self.game_logic.consume_pending_first_deploy_boundary()
         self._last_deploy_ts = now
 
-        summary = self.game_logic.deploy_phase(screen)
+        summary = (self.game_logic.deploy_phase(screen) if captured_at is None
+                   else self.game_logic.deploy_phase(screen, captured_at=captured_at))
         if summary["elixir"] is not None:
             self.last_elixir_value = summary["elixir"]
         return summary
 
-    def collect_orbs(self, screen):
+    def collect_orbs(self, screen, captured_at=None):
         """Tap every quest orb on the arena; they hand out money"""
         orbs = self.game_logic.reader.orbs(screen)
+        captured_at = (getattr(self, "_current_frame_captured_at", None) if captured_at is None
+                       else captured_at)
         frame_id = self.diagnostics.frame_id(screen) if diagnostics_enabled(self) else None
         if diagnostics_enabled(self):
             self.diagnostics.event("orb_detection", frame_id=frame_id, source="MergeTacticsBot.collect_orbs",
@@ -207,6 +232,17 @@ class MergeTacticsBot:
                                          "call_source": "main_loop"})
         tapped = False
         for x, y in orbs:
+            if getattr(self, "verify_actions", False) and self._record_action_age("orb", screen, captured_at):
+                self._record_stale_tap("orb", screen)
+                try:
+                    fresh = self.adb.screenshot()
+                except Exception as exc:
+                    logger.warning("[ORB] could not refresh stale observation: %s", type(exc).__name__)
+                    return None
+                self._current_frame_captured_at = time.monotonic()
+                if diagnostics_enabled(self):
+                    self.diagnostics.record_frame(fresh, reason="stale_orb_refresh")
+                return fresh
             logger.info(f"[ORB] collect at ({x}, {y})")
             action_id = None
             if diagnostics_enabled(self):
@@ -235,6 +271,7 @@ class MergeTacticsBot:
         if tapped:
             try:
                 fresh = self.adb.screenshot()
+                self._current_frame_captured_at = time.monotonic()
             except Exception as exc:
                 logger.warning("[ORB] could not refresh frame: %s", type(exc).__name__)
                 if diagnostics_enabled(self):
@@ -256,15 +293,27 @@ class MergeTacticsBot:
         if diagnostics_enabled(self):
             self.diagnostics.event("session_started", source="MergeTacticsBot.run",
                                    data={"auto_search": auto_search, "duration_seconds": duration,
-                                         "strategy": "legacy"})
+                                         "strategy": "verify_actions" if getattr(self, "verify_actions", False) else "legacy",
+                                         "max_frame_age_seconds": getattr(self, "max_frame_age_seconds", 3.0)})
 
+        previous_iteration_at = None
         while True:
+            iteration_at = time.monotonic()
+            if previous_iteration_at is not None and diagnostics_enabled(self):
+                pause_ms = round((iteration_at - previous_iteration_at) * 1000)
+                if pause_ms >= 5000:
+                    self.diagnostics.event("long_iteration_pause", source="MergeTacticsBot.run",
+                                           data={"pause_ms": pause_ms,
+                                                 "threshold_ms": 5000,
+                                                 "certainty": "observed"})
+            previous_iteration_at = iteration_at
             if deadline and time.time() >= deadline:
                 logger.info("[BOT] duration reached, stopping")
                 break
 
             try:
                 screen = self.adb.screenshot()
+                self._current_frame_captured_at = time.monotonic()
             except Exception as e:
                 logger.error(f"[BOT] screenshot failed: {e}")
                 if diagnostics_enabled(self):
@@ -286,7 +335,7 @@ class MergeTacticsBot:
             # Orbs give money and can show up in any colour during deploy and
             # battle, so grab any on screen every frame.
             if phase in ("deploy", "battle"):
-                refreshed = self.collect_orbs(screen)
+                refreshed = self.collect_orbs(screen, self._current_frame_captured_at)
                 if refreshed is None:
                     # Never make phase or purchase decisions from the pre-tap frame.
                     time.sleep(ERROR_DELAY)
@@ -297,12 +346,15 @@ class MergeTacticsBot:
                     self.diagnostics.observe_phase(phase, frame_id=self.diagnostics.frame_id(screen))
             if phase == "deploy":
                 if not self._deploy_played:
-                    summary = self.handle_deploy_phase(screen)
+                    summary = (self.handle_deploy_phase(screen, self._current_frame_captured_at)
+                               if getattr(self, "verify_actions", False)
+                               else self.handle_deploy_phase(screen))
                     # Only commit the round when the shop was actually read.
                     # "no_cards" means recognition failed (e.g. purchase
                     # animation), so retry on a later frame instead of skipping.
                     if (summary and summary.get("elixir") is not None
-                            and summary.get("reason") != "no_cards"):
+                            and summary.get("reason") not in ("no_cards", "stale_frame",
+                                                              "verification_pending")):
                         self._deploy_played = True
                 time.sleep(0.8)
             elif phase == "battle":
@@ -314,6 +366,42 @@ class MergeTacticsBot:
                     if self.search_match(screen):
                         last_search = time.time()
                 time.sleep(2.0)
+
+    def _record_stale_tap(self, action, screen):
+        captured_at = getattr(self, "_current_frame_captured_at", None)
+        age_ms = (max(0, round((time.monotonic() - captured_at) * 1000))
+                  if captured_at is not None else None)
+        logger.info("[ACTION] discarded stale %s observation (%sms)", action, age_ms)
+        if diagnostics_enabled(self):
+            self.diagnostics.event("action_discarded_stale",
+                                   frame_id=self.diagnostics.frame_id(screen),
+                                   source="MergeTacticsBot",
+                                   data={"action": action, "frame_age_ms": age_ms,
+                                         "max_frame_age_ms": round(getattr(self, "max_frame_age_seconds", 3.0) * 1000),
+                                         "reason": "stale_observation"})
+
+    def _record_action_age(self, action, screen, captured_at=None):
+        if not getattr(self, "verify_actions", False):
+            return False
+        captured_at = (getattr(self, "_current_frame_captured_at", None)
+                       if captured_at is None else captured_at)
+        if captured_at is None:
+            if diagnostics_enabled(self):
+                self.diagnostics.event("action_frame_age", frame_id=self.diagnostics.frame_id(screen),
+                                       source="MergeTacticsBot",
+                                       data={"action": action, "frame_age_ms": None,
+                                             "max_frame_age_ms": round(getattr(self, "max_frame_age_seconds", 3.0) * 1000),
+                                             "stale": True, "reason": "capture_time_unavailable"})
+            return True
+        age_ms = max(0, round((time.monotonic() - captured_at) * 1000))
+        max_age_ms = round(getattr(self, "max_frame_age_seconds", 3.0) * 1000)
+        if diagnostics_enabled(self):
+            self.diagnostics.event("action_frame_age", frame_id=self.diagnostics.frame_id(screen),
+                                   source="MergeTacticsBot",
+                                   data={"action": action, "frame_age_ms": age_ms,
+                                         "max_frame_age_ms": max_age_ms,
+                                         "stale": age_ms > max_age_ms})
+        return age_ms > max_age_ms
 
 
 def main():
@@ -332,6 +420,8 @@ def main():
                         help="maximum size per diagnostics session in MiB (default: 512)")
     parser.add_argument("--verify-actions", action="store_true",
                         help="require visual confirmation before updating purchase state")
+    parser.add_argument("--max-frame-age", type=positive_seconds, default=3.0,
+                        help="maximum observation age before re-capturing (seconds; default: 3)")
     args = parser.parse_args()
 
     diagnostics = None
@@ -348,7 +438,8 @@ def main():
 
     finish_reason = "normal"
     try:
-        bot = (MergeTacticsBot(diagnostics=diagnostics, verify_actions=True)
+        bot = (MergeTacticsBot(diagnostics=diagnostics, verify_actions=True,
+                               max_frame_age_seconds=args.max_frame_age)
                if args.verify_actions else
                MergeTacticsBot(diagnostics=diagnostics) if diagnostics is not None else MergeTacticsBot())
         bot.run(auto_search=not args.no_search, duration=args.duration)

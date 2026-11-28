@@ -16,14 +16,18 @@ logger = logging.getLogger(__name__)
 
 
 class GameLogic:
-    def __init__(self, adb_controller, image_processor, diagnostics=None, verify_actions=False):
+    def __init__(self, adb_controller, image_processor, diagnostics=None, verify_actions=False,
+                 max_frame_age_seconds=3.0):
         self.adb = adb_controller
         self.image_processor = image_processor
         self.diagnostics = diagnostics
         self.reader = (BoardReader(image_processor, include_diagnostics=bool(diagnostics and diagnostics.enabled))
                        if diagnostics is not None else BoardReader(image_processor))
-        self.planner = (DeployPlanner(self.reader, self.adb, diagnostics=diagnostics)
-                        if diagnostics is not None else DeployPlanner(self.reader, self.adb))
+        self.planner = (DeployPlanner(self.reader, self.adb, diagnostics=diagnostics,
+                                      max_frame_age_seconds=max_frame_age_seconds)
+                        if diagnostics is not None else
+                        DeployPlanner(self.reader, self.adb,
+                                      max_frame_age_seconds=max_frame_age_seconds))
         self.planner.verify_actions = verify_actions
         self.run_state = RunState()
         self._pending_first_deploy = False
@@ -55,9 +59,11 @@ class GameLogic:
         logger.info("[RUN] new match state")
         return True
 
-    def deploy_phase(self, screen):
+    def deploy_phase(self, screen, captured_at=None):
         """Play one deploy phase and return a summary of what happened"""
-        return self.planner.play(screen, self.run_state)
+        if captured_at is None:
+            return self.planner.play(screen, self.run_state)
+        return self.planner.play(screen, self.run_state, captured_at=captured_at)
 
     def consume_pending_first_deploy_boundary(self):
         self._pending_first_deploy = False

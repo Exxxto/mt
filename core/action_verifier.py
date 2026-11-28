@@ -28,6 +28,7 @@ class Observation:
     elixir: int | None = None
     shop_cards: tuple | None = None
     selected_slot: tuple | None = None
+    own_units: int | None = None
 
 
 @dataclass
@@ -56,7 +57,8 @@ class ActionVerifier:
 
     @staticmethod
     def verify_purchase(*, action_id, adb_status, frame_before, frame_after,
-                        before, after, cost, started_at=None, rechecks=0):
+                        before, after, cost, started_at=None, rechecks=0,
+                        allow_unit_count=True):
         started_at = time.monotonic() if started_at is None else started_at
         evidence = []
         elapsed = max(0, round((time.monotonic() - started_at) * 1000))
@@ -72,17 +74,23 @@ class ActionVerifier:
             slot_known = before.selected_slot is not None and after.selected_slot is not None
             slot_changed = slot_known and before.selected_slot[0] == after.selected_slot[0] and \
                 before.selected_slot[1] != after.selected_slot[1]
+            units_increased = (allow_unit_count and before.own_units is not None and after.own_units is not None
+                               and after.own_units > before.own_units)
             if elixir_matches:
                 evidence.append("elixir_delta_matches_cost")
             if shop_changed:
                 evidence.append("shop_assortment_changed")
             if slot_changed:
                 evidence.append("selected_slot_changed")
-            if elixir_matches and (shop_changed or slot_changed):
-                status, reason = ActionStatus.CONFIRMED, "elixir delta and shop selection evidence agree"
+            if units_increased:
+                evidence.append("own_unit_count_increased")
+            independent_change = shop_changed or slot_changed or units_increased
+            if elixir_matches and independent_change:
+                status, reason = ActionStatus.CONFIRMED, "expected elixir spend and independent game-state change agree"
             elif adb_status != "succeeded":
                 status, reason = ActionStatus.UNKNOWN, f"ADB command {adb_status}; game effect is uncertain"
-            elif delta == 0 and shop_known and not shop_changed and slot_known and not slot_changed:
+            elif (delta == 0 and shop_known and not shop_changed and slot_known
+                  and not slot_changed and not units_increased):
                 status, reason = ActionStatus.FAILED, "no visible purchase effect"
             elif delta != cost:
                 status, reason = ActionStatus.UNKNOWN, "observed elixir delta does not match purchase cost"
