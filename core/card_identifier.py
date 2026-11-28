@@ -109,13 +109,21 @@ class CardIdentifier:
         self.library = library
         self.sift = cv2.SIFT_create()
         self.descriptors = {}
+        self.clahe_descriptors = {}
         self.art_gray = {}
+        self.clahe_gray = {}
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         for name, img in library.items():
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             keypoints, desc = self.sift.detectAndCompute(gray, None)
             if desc is not None and len(keypoints) > 0:
                 self.descriptors[name] = (keypoints, desc)
                 self.art_gray[name] = gray
+                enhanced = self.clahe.apply(gray)
+                self.clahe_gray[name] = enhanced
+                enhanced_keypoints, enhanced_desc = self.sift.detectAndCompute(enhanced, None)
+                if enhanced_desc is not None and len(enhanced_keypoints) > 0:
+                    self.clahe_descriptors[name] = (enhanced_keypoints, enhanced_desc)
         self.matcher = cv2.BFMatcher()
 
     @staticmethod
@@ -142,15 +150,32 @@ class CardIdentifier:
 
     def identify(self, tile, min_inliers=12, min_corr=0.45):
         """Return (card name, inliers) for a shop tile, or (None, inliers)"""
+        result = self.identify_detailed(tile, min_inliers=min_inliers, min_corr=min_corr)
+        return result["name"], result["inliers"]
+
+    def identify_detailed(self, tile, min_inliers=12, min_corr=0.45):
+        """Return identity and match evidence, retrying dim tiles with CLAHE."""
         if tile is None or tile.size == 0:
-            return None, 0
+            return {"name": None, "inliers": 0, "score": None, "method": "sift"}
         gray = cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY)
+        name, inliers, score = self._identify(gray, self.descriptors, self.art_gray,
+                                              min_inliers, min_corr)
+        if name is not None:
+            return {"name": name, "inliers": inliers, "score": score, "method": "sift"}
+        enhanced = self.clahe.apply(gray)
+        name, inliers, score = self._identify(enhanced, self.clahe_descriptors,
+                                              self.clahe_gray, min_inliers, min_corr)
+        return {"name": name, "inliers": inliers, "score": score,
+                "method": "sift_clahe"}
+
+    def _identify(self, tile_gray, descriptors, art_gray, min_inliers, min_corr):
+        gray = tile_gray
         keypoints, desc = self.sift.detectAndCompute(gray, None)
         if desc is None or len(keypoints) < 8:
-            return None, 0
+            return None, 0, None
 
         best = None  # (correlation, inliers, name)
-        for name, (art_kp, art_desc) in self.descriptors.items():
+        for name, (art_kp, art_desc) in descriptors.items():
             matches = self.matcher.knnMatch(art_desc, desc, k=2)
             good = [m for pair in matches if len(pair) == 2 for m, n in [pair] if m.distance < 0.75 * n.distance]
             if len(good) < 8:
@@ -163,12 +188,12 @@ class CardIdentifier:
             inliers = int(mask.sum())
             if inliers < min_inliers:
                 continue
-            corr = self._warp_correlation(self.art_gray[name], homography, gray)
+            corr = self._warp_correlation(art_gray[name], homography, gray)
             if corr is None:
                 continue
             if best is None or (corr, inliers) > (best[0], best[1]):
                 best = (corr, inliers, name)
 
         if best is None or best[0] < min_corr:
-            return None, best[1] if best else 0
-        return best[2], best[1]
+            return None, best[1] if best else 0, best[0] if best else None
+        return best[2], best[1], best[0]

@@ -13,6 +13,7 @@ import numpy as np
 
 from core.diagnostics import DiagnosticsSession, NoOpDiagnostics
 from core.board_state import BoardReader, ShopCard
+from core.card_identifier import CardIdentifier
 from core.strategy import DeployPlanner, RunState
 from config.board_layout import SHOP_CENTERS
 from core.game_logic import GameLogic
@@ -461,6 +462,33 @@ class DecisionDiagnosticsTests(unittest.TestCase):
         self.assertEqual(cards[1].cost_source, "fallback_unit_costs")
         self.assertEqual(cards[1].name_inliers, 7)
 
+    def test_shop_reader_records_identity_method_score_and_visual_state(self):
+        reader = BoardReader.__new__(BoardReader)
+        reader.include_diagnostics = True
+        reader.identifier = type("Identifier", (), {
+            "identify_detailed": lambda _self, _tile: {
+                "name": "knight", "inliers": 18, "score": 0.72,
+                "method": "sift_clahe"}})()
+        reader._read_cost = lambda _screen, _index: 2
+        screen = np.zeros((1600, 900, 3), dtype=np.uint8)
+
+        cards = reader.shop_cards(screen)
+
+        self.assertEqual(cards[0].recognition_method, "sift_clahe")
+        self.assertEqual(cards[0].match_score, 0.72)
+        self.assertEqual(cards[0].visual_state, "dim")
+
+    def test_card_identifier_retries_with_clahe_without_lowering_thresholds(self):
+        identifier = CardIdentifier({})
+        with patch.object(identifier, "_identify", side_effect=[(None, 7, 0.31),
+                                                                   ("knight", 13, 0.51)]) as match:
+            result = identifier.identify_detailed(np.zeros((150, 120, 3), dtype=np.uint8))
+
+        self.assertEqual(result, {"name": "knight", "inliers": 13,
+                                  "score": 0.51, "method": "sift_clahe"})
+        self.assertEqual(match.call_args_list[0].args[3:5], (12, 0.45))
+        self.assertEqual(match.call_args_list[1].args[3:5], (12, 0.45))
+
 
 class FakeFrame:
     def __init__(self, elixir):
@@ -750,7 +778,7 @@ class ActionDiagnosticsTests(unittest.TestCase):
         screen = FakeFrame(0)
         card = ShopCard("dark_prince", 2, SHOP_CENTERS[0])
         reader = FakeReader([card], orbs=[(100, 200)])
-        adb = FakeADB([FakeFrame(0)])
+        adb = FakeADB([FakeFrame(0), FakeFrame(0)])
         diag.record_frame(screen, reason="deploy")
         bot = MergeTacticsBot.__new__(MergeTacticsBot)
         bot.diagnostics = diag
@@ -766,12 +794,14 @@ class ActionDiagnosticsTests(unittest.TestCase):
         events = self._events(diag)
         taps = [event for event in events if event["event_type"] == "orb_tap_attempt"]
         self.assertEqual(len(taps), 1)
-        self.assertEqual({event["frame_id"] for event in taps}, {1})
+        self.assertEqual({event["frame_id"] for event in taps}, {2})
         self.assertEqual({event["source"] for event in taps},
                          {"MergeTacticsBot.collect_orbs"})
         self.assertTrue(any(event["event_type"] == "frame_reused" for event in events))
         self.assertEqual(adb.taps, [(100, 200)])
-        self.assertEqual(adb.screenshots, 1)
+        self.assertEqual(adb.screenshots, 2)
+        outcomes = [event for event in events if event["event_type"] == "orb_collection_result"]
+        self.assertEqual([event["data"]["status"] for event in outcomes], ["unknown"])
 
     def test_existing_main_loop_screenshot_error_is_structured(self):
         _, diag = self._session()

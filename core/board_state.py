@@ -43,6 +43,9 @@ class ShopCard:
     slot_index: int = None
     cost_source: str = None
     name_inliers: int = None
+    recognition_method: str = None
+    match_score: float = None
+    visual_state: str = None
 
 
 @dataclass
@@ -89,7 +92,14 @@ class BoardReader:
         if screen is None:
             return cards
         for index, (y0, y1, x0, x1) in enumerate(SHOP_TILES):
-            name, inliers = self.identifier.identify(screen[y0:y1, x0:x1])
+            tile = screen[y0:y1, x0:x1]
+            if hasattr(self.identifier, "identify_detailed"):
+                match = self.identifier.identify_detailed(tile)
+                name, inliers = match["name"], match["inliers"]
+                method, score = match["method"], match["score"]
+            else:
+                name, inliers = self.identifier.identify(tile)
+                method, score = "sift", None
             if name is None:
                 continue
             recognized_cost = self._read_cost(screen, index)
@@ -98,9 +108,12 @@ class BoardReader:
                 continue
             if getattr(self, "include_diagnostics", False):
                 cost_source = "recognized_digit" if recognized_cost else "fallback_unit_costs"
+                brightness = float(cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY).mean())
+                visual_state = "dim" if brightness < 85 else "light" if brightness >= 100 else "unknown"
                 cards.append(ShopCard(name=name, cost=cost, center=SHOP_CENTERS[index],
                                       slot_index=index, cost_source=cost_source,
-                                      name_inliers=inliers))
+                                      name_inliers=inliers, recognition_method=method,
+                                      match_score=score, visual_state=visual_state))
             else:
                 cards.append(ShopCard(name=name, cost=cost, center=SHOP_CENTERS[index]))
         return cards
@@ -128,6 +141,10 @@ class BoardReader:
 
     def orbs(self, screen):
         """Centres of the quest orbs on the arena (any colour)"""
+        return [item["center"] for item in self.orb_detections(screen)]
+
+    def orb_detections(self, screen):
+        """Return HSV orb candidates with the geometry needed for confirmation."""
         if screen is None:
             return []
         x0, y0, x1, y1 = ARENA_RECT
@@ -142,7 +159,9 @@ class BoardReader:
                 continue
             if area < ORB_MIN_FILL * w * h:
                 continue
-            found.append((int(centroids[i][0]) + x0, int(centroids[i][1]) + y0))
+            found.append({"center": (int(centroids[i][0]) + x0, int(centroids[i][1]) + y0),
+                          "bounds": (int(x + x0), int(y + y0), int(w), int(h)),
+                          "fill": float(area / (w * h))})
         return found
 
     def own_units(self, screen):

@@ -221,19 +221,97 @@ class MergeTacticsBot:
 
     def collect_orbs(self, screen, captured_at=None):
         """Tap every quest orb on the arena; they hand out money"""
-        orbs = self.game_logic.reader.orbs(screen)
+        reader = self.game_logic.reader
+        detect_orbs = getattr(reader, "orb_detections", None)
+        if callable(detect_orbs):
+            candidates = detect_orbs(screen)
+        else:
+            candidates = [{"center": point, "bounds": None, "fill": None}
+                          for point in reader.orbs(screen)]
         captured_at = (getattr(self, "_current_frame_captured_at", None) if captured_at is None
                        else captured_at)
         frame_id = self.diagnostics.frame_id(screen) if diagnostics_enabled(self) else None
         if diagnostics_enabled(self):
             self.diagnostics.event("orb_detection", frame_id=frame_id, source="MergeTacticsBot.collect_orbs",
-                                   data={"coordinates": [list(point) for point in orbs],
-                                         "count": len(orbs), "certainty": "observed",
+                                   data={"coordinates": [list(item["center"]) for item in candidates],
+                                         "count": len(candidates), "certainty": "candidate",
                                          "call_source": "main_loop"})
+        if not candidates:
+            return screen
+        if getattr(self, "verify_actions", False) and self._record_action_age("orb", screen, captured_at):
+            if diagnostics_enabled(self):
+                for item in candidates:
+                    self.diagnostics.event("orb_candidate_rejected", frame_id=frame_id,
+                                           source="MergeTacticsBot.collect_orbs",
+                                           data={"coordinates": list(item["center"]),
+                                                 "reason": "stale_frame"})
+            try:
+                fresh = self.adb.screenshot()
+            except Exception as exc:
+                logger.warning("[ORB] could not refresh stale observation: %s", type(exc).__name__)
+                return None
+            self._current_frame_captured_at = time.monotonic()
+            if diagnostics_enabled(self):
+                self.diagnostics.record_frame(fresh, reason="stale_orb_refresh")
+            return fresh
+
+        # A real collectible stays in place across captures; combat flashes and
+        # unit highlights change shape too quickly to pass this second look.
+        try:
+            confirmation = self.adb.screenshot()
+        except Exception as exc:
+            logger.warning("[ORB] could not confirm candidate: %s", type(exc).__name__)
+            return screen
+        confirmation_at = time.monotonic()
+        confirmation_id = self.diagnostics.frame_id(confirmation) if diagnostics_enabled(self) else None
+        if diagnostics_enabled(self):
+            self.diagnostics.record_frame(confirmation, reason="orb_candidate_confirmation")
+        if callable(detect_orbs):
+            observed = detect_orbs(confirmation)
+        else:
+            observed = [{"center": point, "bounds": None, "fill": None}
+                        for point in reader.orbs(confirmation)]
+        if diagnostics_enabled(self):
+            self.diagnostics.event("orb_confirmation_scan", frame_id=confirmation_id,
+                                   source="MergeTacticsBot.collect_orbs",
+                                   data={"candidates": [{"coordinates": list(item["center"]),
+                                                         "bounds": item["bounds"]}
+                                                        for item in observed],
+                                         "count": len(observed),
+                                         "certainty": "candidate"})
+        recognized = []
+        for candidate in candidates:
+            x, y = candidate["center"]
+            match = next((item for item in observed
+                          if max(abs(item["center"][0] - x), abs(item["center"][1] - y)) <= 18
+                          and (candidate["bounds"] is None or item["bounds"] is None
+                               or all(0.75 <= a / b <= 1.33
+                                      for a, b in zip(item["bounds"][2:], candidate["bounds"][2:])))), None)
+            if match is None:
+                if diagnostics_enabled(self):
+                    self.diagnostics.event("orb_candidate_rejected", frame_id=frame_id,
+                                           source="MergeTacticsBot.collect_orbs",
+                                           data={"coordinates": [x, y],
+                                                 "reason": "not_stable_across_captures"})
+                continue
+            recognized.append(match)
+            if diagnostics_enabled(self):
+                self.diagnostics.event("orb_recognized", frame_id=confirmation_id,
+                                       source="MergeTacticsBot.collect_orbs",
+                                       data={"coordinates": list(match["center"]),
+                                             "method": "hsv_geometry_persistence",
+                                             "certainty": "recognized"})
+
+        if not recognized:
+            self._current_frame_captured_at = confirmation_at
+            return confirmation
+
         tapped = False
-        for x, y in orbs:
-            if getattr(self, "verify_actions", False) and self._record_action_age("orb", screen, captured_at):
-                self._record_stale_tap("orb", screen)
+        for item in recognized:
+            x, y = item["center"]
+            if getattr(self, "verify_actions", False) and self._record_action_age(
+                    "orb", confirmation, confirmation_at):
+                self._record_stale_tap("orb", confirmation)
                 try:
                     fresh = self.adb.screenshot()
                 except Exception as exc:
@@ -243,11 +321,11 @@ class MergeTacticsBot:
                 if diagnostics_enabled(self):
                     self.diagnostics.record_frame(fresh, reason="stale_orb_refresh")
                 return fresh
-            logger.info(f"[ORB] collect at ({x}, {y})")
+            logger.info(f"[ORB] tap attempt at ({x}, {y})")
             action_id = None
             if diagnostics_enabled(self):
                 action_id = self.diagnostics.new_action_id()
-                self.diagnostics.event("orb_tap_attempt", frame_id=frame_id, action_id=action_id,
+                self.diagnostics.event("orb_tap_attempt", frame_id=confirmation_id, action_id=action_id,
                                        source="MergeTacticsBot.collect_orbs",
                                        data={"coordinates": [x, y], "status": "attempted",
                                              "call_source": "main_loop"})
@@ -255,7 +333,7 @@ class MergeTacticsBot:
                 try:
                     self.adb.tap(x, y)
                 except Exception as exc:
-                    self.diagnostics.event("adb_error", frame_id=frame_id, action_id=action_id,
+                    self.diagnostics.event("adb_error", frame_id=confirmation_id, action_id=action_id,
                                            source="MergeTacticsBot.collect_orbs",
                                            data={"operation": "orb_tap", "error_type": type(exc).__name__,
                                                  "coordinates": [x, y], "certainty": "observed"})
@@ -263,9 +341,13 @@ class MergeTacticsBot:
             else:
                 self.adb.tap(x, y)
             if diagnostics_enabled(self):
-                self.diagnostics.event("orb_tap_returned", frame_id=frame_id, action_id=action_id,
+                self.diagnostics.event("orb_tap_returned", frame_id=confirmation_id, action_id=action_id,
                                        source="MergeTacticsBot.collect_orbs",
                                        data={"adb_call_returned": True, "device_confirmation": "unknown"})
+                self.diagnostics.event("orb_collection_result", frame_id=confirmation_id,
+                                       action_id=action_id, source="MergeTacticsBot.collect_orbs",
+                                       data={"status": "unknown",
+                                             "reason": "no post-tap game-state confirmation"})
             time.sleep(0.15)
             tapped = True
         if tapped:

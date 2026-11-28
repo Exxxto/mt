@@ -659,18 +659,49 @@ class BotLoopTests(unittest.TestCase):
     class StopLoop(BaseException):
         pass
 
-    def test_orb_refresh_failure_returns_no_frame(self):
+    def test_orb_confirmation_failure_does_not_tap_candidate(self):
         bot = MergeTacticsBot.__new__(MergeTacticsBot)
         bot.adb = Mock()
         bot.adb.screenshot.side_effect = OSError("device offline")
         bot.game_logic = Mock()
         bot.game_logic.reader.orbs.return_value = [(10, 20)]
+        bot.game_logic.reader.orb_detections = None
         bot.diagnostics = None
 
         result = bot.collect_orbs("source-frame")
 
-        self.assertIsNone(result)
-        bot.adb.tap.assert_called_once_with(10, 20)
+        self.assertEqual(result, "source-frame")
+        bot.adb.tap.assert_not_called()
+
+    def test_orb_that_disappears_from_confirmation_frame_is_rejected(self):
+        bot = MergeTacticsBot.__new__(MergeTacticsBot)
+        bot.adb = Mock()
+        bot.adb.screenshot.return_value = "confirmation-frame"
+        bot.game_logic = Mock()
+        bot.game_logic.reader.orbs.side_effect = [[(10, 20)], []]
+        bot.game_logic.reader.orb_detections = None
+        bot.diagnostics = None
+
+        result = bot.collect_orbs("candidate-frame")
+
+        self.assertEqual(result, "confirmation-frame")
+        bot.adb.tap.assert_not_called()
+
+    def test_orb_candidate_must_keep_approximately_same_shape(self):
+        bot = MergeTacticsBot.__new__(MergeTacticsBot)
+        bot.adb = Mock()
+        bot.adb.screenshot.side_effect = ["confirmation-frame", "after-tap-frame"]
+        bot.game_logic = Mock()
+        bot.game_logic.reader.orb_detections.side_effect = [
+            [{"center": (10, 20), "bounds": (0, 0, 50, 50), "fill": .6}],
+            [{"center": (11, 21), "bounds": (0, 0, 110, 110), "fill": .6}],
+        ]
+        bot.diagnostics = None
+
+        result = bot.collect_orbs("candidate-frame")
+
+        self.assertEqual(result, "confirmation-frame")
+        bot.adb.tap.assert_not_called()
 
     def test_loop_drops_old_frame_after_orb_refresh_failure(self):
         bot = MergeTacticsBot.__new__(MergeTacticsBot)
