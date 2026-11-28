@@ -1,0 +1,1389 @@
+{
+  "session_id": "session-ee2e7d0d72b64813a96ff3cb739fe332",
+  "split": "holdout",
+  "excluded_frames": [
+    415,
+    820,
+    940
+  ],
+  "frames": [
+    {
+      "match_id": "match-006",
+      "frame_id": 414,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 416,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 417,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 447,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 448,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 449,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 450,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 483,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 484,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 485,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 518,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 519,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 520,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 521,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 522,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 523,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-006",
+      "frame_id": 524,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "archer"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 819,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 821,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 822,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 823,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 844,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 845,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 846,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 847,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 848,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 849,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 850,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 875,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 876,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 877,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 878,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 879,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 880,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 881,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 902,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 903,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-009",
+      "frame_id": 904,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "barbarian"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 939,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 941,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 942,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 943,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 944,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 945,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 946,
+      "slots": [
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 947,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "golden_knight"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 966,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "golden_knight"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 967,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "golden_knight"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 968,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "golden_knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 969,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "golden_knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "bomber"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 997,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "golden_knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "bomber"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 998,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "golden_knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "bomber"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    },
+    {
+      "match_id": "match-010",
+      "frame_id": 999,
+      "slots": [
+        {
+          "occupancy": "occupied",
+          "unit_name": "golden_knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "knight"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "bomber"
+        },
+        {
+          "occupancy": "occupied",
+          "unit_name": "archer"
+        },
+        {
+          "occupancy": "empty",
+          "unit_name": null
+        }
+      ]
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 """Conservative visual observations of the local reserve on 900x1600 frames."""
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import logging
 from pathlib import Path
 import time
@@ -37,15 +37,16 @@ class BenchObservation:
 class BenchReader:
     def __init__(self, background_path='templates/empty_bench.png', model_dir='templates/bench'):
         self.background = cv2.imread(str(background_path)) if Path(background_path).is_file() else None
-        self.models = {}
+        self.models = []
         for path in Path(model_dir).glob('*.png'):
             image = cv2.imread(str(path))
             if image is not None:
-                self.models[path.stem] = image
+                self.models.append((path.stem.split('__', 1)[0], image))
 
     def read(self, screen, frame_id=None):
         started = time.perf_counter()
         slots = []
+        matches = []
         valid = (isinstance(screen, np.ndarray) and screen.shape == (1600, 900, 3)
                  and screen.dtype == np.uint8 and self.background is not None
                  and self.background.shape == (112, 486, 3))
@@ -68,6 +69,7 @@ class BenchReader:
             bounds = (160 + index * 94, 1234, 160 + (index + 1) * 94, 1346)
             if not valid:
                 slots.append(BenchSlot(index, center, bounds))
+                matches.append(None)
                 continue
             x = 12 + index * 94
             reference = self.background[18:80, x:x+75]
@@ -79,19 +81,24 @@ class BenchReader:
             score = float(np.mean(difference[mask] > 35)) if mask.any() else None
             occupancy = ('empty' if score is not None and score < .15 else
                          'occupied' if score is not None and score > .35 else 'unknown')
-            name, match_score = None, None
+            if occupancy == 'empty':
+                observed_hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+                bright = (observed_hsv[:, :, 2] > 220) & (observed_hsv[:, :, 1] < 100)
+                if np.mean(bright) > .04:
+                    occupancy = 'unknown'
+            name, match_score, match_box = None, None, None
             if occupancy == 'occupied':
                 candidates = []
-                for unit, template in self.models.items():
+                for unit, template in self.models:
                     h, w = template.shape[:2]
                     x0 = max(0, center[0] - w // 2 - 24)
                     x1 = min(900, center[0] - w // 2 + 24 + w)
                     region = screen[1190:min(1600, 1280+h), x0:x1]
                     if region.shape[0] >= h and region.shape[1] >= w:
-                        _, value, _, _ = cv2.minMaxLoc(cv2.matchTemplate(region, template, cv2.TM_CCOEFF_NORMED))
-                        candidates.append((value, unit))
+                        _, value, _, location = cv2.minMaxLoc(cv2.matchTemplate(region, template, cv2.TM_CCOEFF_NORMED))
+                        candidates.append((value, unit, (x0 + location[0], 1190 + location[1], w, h)))
                 if candidates:
-                    match_score, match_name = max(candidates)
+                    match_score, match_name, match_box = max(candidates)
                     if match_score >= .75:
                         name = match_name
             slots.append(BenchSlot(index, center, bounds, occupancy, name, None,
@@ -99,6 +106,18 @@ class BenchReader:
                                    'observed' if name else 'unknown', 'unknown',
                                    'template_correlation' if match_score is not None else None,
                                    match_score, score))
+            matches.append(match_box if name else None)
+        for index in range(1, len(slots)):
+            first, second = matches[index - 1:index + 1]
+            if not first or not second:
+                continue
+            ax, ay, aw, ah = first
+            bx, by, bw, bh = second
+            overlap = max(0, min(ax + aw, bx + bw) - max(ax, bx)) * max(0, min(ay + ah, by + bh) - max(ay, by))
+            if overlap:
+                loser = index if slots[index - 1].recognition_score >= slots[index].recognition_score else index - 1
+                slots[loser] = replace(slots[loser], unit_name=None, identity_certainty='unknown')
+                matches[loser] = None
         return BenchObservation(slots, sum(s.occupancy == 'occupied' for s in slots),
                                 sum(s.occupancy == 'empty' for s in slots),
                                 sum(s.occupancy == 'unknown' for s in slots), frame_id,

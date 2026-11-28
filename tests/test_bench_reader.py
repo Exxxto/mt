@@ -49,6 +49,11 @@ class BenchReaderTests(unittest.TestCase):
         cv2.rectangle(image, (266, 1252), (284, 1313), (20, 20, 20), -1)
         self.assertNotEqual(self.reader.read(image).slots[1].occupancy, 'occupied')
 
+    def test_bright_merge_effect_is_not_reported_as_empty(self):
+        image = self.frame()
+        cv2.circle(image, (207, 1280), 8, (255, 255, 255), -1)
+        self.assertEqual(self.reader.read(image).slots[0].occupancy, 'unknown')
+
     def test_absent_invalid_and_obscured_images_are_unknown(self):
         for image in (None, np.zeros((5, 5, 3), np.uint8), np.zeros((1600, 900, 3), np.uint8)):
             self.assertEqual(self.reader.read(image).unknown_count, 5)
@@ -67,6 +72,52 @@ class BenchReaderTests(unittest.TestCase):
         slot = self.reader.read(self.frame((2,))).slots[2]
         self.assertEqual(slot.unit_name, 'archer')
         self.assertIsNone(slot.stars)
+
+    def test_alternate_visual_reference_keeps_character_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            variant = cv2.flip(self.model, 1)
+            cv2.imwrite(str(Path(folder) / 'archer__turn.png'), variant)
+            frame = self.frame((0,))
+            x = 207 - variant.shape[1] // 2
+            frame[1230:1230 + variant.shape[0], x:x + variant.shape[1]] = variant
+            slot = BenchReader(model_dir=folder).read(frame).slots[0]
+            self.assertEqual(slot.unit_name, 'archer')
+
+    def test_overlapping_references_do_not_identify_one_model_twice(self):
+        rng = np.random.default_rng(23)
+        unit = rng.integers(0, 256, (62, 170, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as folder:
+            cv2.imwrite(str(Path(folder) / 'unit.png'), unit)
+            cv2.imwrite(str(Path(folder) / 'unit__detail.png'), unit[:, -25:])
+            image = self.frame()
+            image[1252:1314, 122:292] = unit
+            image[1252:1314, 292:325] = 20
+            slots = BenchReader(model_dir=folder).read(image).slots
+            self.assertEqual(sum(slot.unit_name == 'unit' for slot in slots[:2]), 1)
+
+    def test_two_separate_matching_models_can_share_a_name(self):
+        slots = self.reader.read(self.frame((0, 1))).slots
+        self.assertEqual([slot.unit_name for slot in slots[:2]], ['archer', 'archer'])
+
+    def test_partially_overlapping_references_do_not_identify_one_model_twice(self):
+        unit = np.random.default_rng(37).integers(0, 256, (62, 204, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as folder:
+            cv2.imwrite(str(Path(folder) / 'unit.png'), unit[:, :110])
+            cv2.imwrite(str(Path(folder) / 'unit__detail.png'), unit[:, -110:])
+            image = self.frame()
+            image[1252:1314, 152:356] = unit
+            slots = BenchReader(model_dir=folder).read(image).slots
+            self.assertEqual(sum(slot.unit_name == 'unit' for slot in slots[:2]), 1)
+
+    def test_overlapping_references_with_different_names_do_not_identify_twice(self):
+        unit = np.random.default_rng(37).integers(0, 256, (62, 204, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as folder:
+            cv2.imwrite(str(Path(folder) / 'unit.png'), unit[:, :110])
+            cv2.imwrite(str(Path(folder) / 'other.png'), unit[:, -110:])
+            image = self.frame()
+            image[1252:1314, 152:356] = unit
+            slots = BenchReader(model_dir=folder).read(image).slots
+            self.assertEqual(sum(slot.unit_name is not None for slot in slots[:2]), 1)
 
 
 class BenchIntegrationTests(unittest.TestCase):
