@@ -146,6 +146,13 @@ def analyze_session(path, verbose=False):
             lines.append("Фазы: наблюдений=" + str(counters.get("phase_observations", 0))
                          + ", переходов=" + str(counters.get("phase_transitions", 0)))
     lines.append(f"Продажа: {len(sales)} связанных событий; повторно использованных кадров: {repeated_frames}; неизвестных значений: {unknowns}")
+    observations = [event for event in events if event["event_type"] == "bench_observation"]
+    if observations:
+        last = observations[-1].get("data")
+        if not isinstance(last, dict):
+            last = {}
+        lines.append(f"Скамейка: наблюдений={len(observations)}, занято={last.get('occupied_count', '?')}, "
+                     f"свободно={last.get('empty_count', '?')}, неизвестно={last.get('unknown_count', '?')}")
     errors = Counter(event["event_type"] for event in events
                      if event["event_type"] in ("adb_error", "screenshot_error"))
     lines.append("Ошибки: " + (", ".join(f"{key}={value}" for key, value in sorted(errors.items()))

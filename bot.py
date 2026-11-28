@@ -82,7 +82,8 @@ def _diagnostics_metadata(args):
         },
         "frame_size": None,
         "parameters": {
-            "diagnostics": bool(args.diagnostics or args.record_frames),
+            "diagnostics": bool(args.diagnostics or args.record_frames or getattr(args, "observe_bench", False)),
+            "observe_bench": getattr(args, "observe_bench", False),
             "record_frames": bool(args.record_frames),
             "auto_search": not args.no_search,
             "duration_seconds": args.duration,
@@ -99,13 +100,16 @@ def diagnostics_enabled(bot):
 
 
 class MergeTacticsBot:
-    def __init__(self, diagnostics=None, verify_actions=False, max_frame_age_seconds=3.0):
+    def __init__(self, diagnostics=None, verify_actions=False, max_frame_age_seconds=3.0, observe_bench=False):
         self.diagnostics = diagnostics
         self.adb = ADBController(ADB_PATH)
         self.image_processor = ImageProcessor()
         self.game_logic = GameLogic(self.adb, self.image_processor, diagnostics=diagnostics,
                                     verify_actions=verify_actions,
                                     max_frame_age_seconds=max_frame_age_seconds)
+        if observe_bench and diagnostics and diagnostics.enabled:
+            from core.bench_reader import BenchObserver
+            self.game_logic.planner.bench_observer = BenchObserver(diagnostics)
         self.verify_actions = verify_actions
         self.max_frame_age_seconds = max_frame_age_seconds
         self._current_frame_captured_at = None
@@ -500,6 +504,8 @@ def main():
                         help="root directory for diagnostic sessions (default: recordings)")
     parser.add_argument("--diagnostics-max-mb", type=positive_int, default=512,
                         help="maximum size per diagnostics session in MiB (default: 512)")
+    parser.add_argument("--observe-bench", action="store_true",
+                        help="observe reserve slots and record diagnostics")
     parser.add_argument("--verify-actions", action="store_true",
                         help="require visual confirmation before updating purchase state")
     parser.add_argument("--max-frame-age", type=positive_seconds, default=3.0,
@@ -507,7 +513,7 @@ def main():
     args = parser.parse_args()
 
     diagnostics = None
-    if args.diagnostics or args.record_frames or args.verify_actions:
+    if args.diagnostics or args.record_frames or args.verify_actions or args.observe_bench:
         try:
             diagnostics = DiagnosticsSession.create(
                 root=args.diagnostics_dir,
@@ -520,7 +526,12 @@ def main():
 
     finish_reason = "normal"
     try:
-        bot = (MergeTacticsBot(diagnostics=diagnostics, verify_actions=True,
+        bot = (MergeTacticsBot(diagnostics=diagnostics, observe_bench=True,
+                               verify_actions=args.verify_actions, max_frame_age_seconds=args.max_frame_age)
+               if args.observe_bench and args.verify_actions else
+               MergeTacticsBot(diagnostics=diagnostics, observe_bench=True)
+               if args.observe_bench else
+               MergeTacticsBot(diagnostics=diagnostics, verify_actions=True,
                                max_frame_age_seconds=args.max_frame_age)
                if args.verify_actions else
                MergeTacticsBot(diagnostics=diagnostics) if diagnostics is not None else MergeTacticsBot())

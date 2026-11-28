@@ -1,0 +1,21 @@
+{
+  "description": "Visual labels for held-out frames; same match was observed during development, so these are not an independent-match test.",
+  "session": "session-ed6cd242abbd44ea932bfe8ffedde096",
+  "frames": {
+    "000059": ["giant_skeleton", null, null, null, null],
+    "000071": ["giant_skeleton", null, null, null, null],
+    "000089": ["giant_skeleton", null, null, null, null],
+    "000101": ["giant_skeleton", "archer", null, null, null],
+    "000110": ["giant_skeleton", "archer", null, null, null],
+    "000115": ["giant_skeleton", "archer", null, null, null]
+  },
+  "independent_match": {
+    "session": "session-608c2f9560f6460db9526b242bbcd475",
+    "match_id": "match-002",
+    "frames": {
+      "000087": ["unknown", "unknown", "unknown", "unknown", "unknown"],
+      "000090": [null, null, null, null, null],
+      "000094": [null, null, null, null, null]
+    }
+  }
+}

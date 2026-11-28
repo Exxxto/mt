@@ -206,6 +206,9 @@ class DeployPlanner:
         captured_at = time.monotonic() if captured_at is None else captured_at
         diagnostic_enabled = bool(self.diagnostics and self.diagnostics.enabled)
         frame_id = self.diagnostics.record_frame(screen, reason="deploy_phase_input") if diagnostic_enabled else None
+        observer = getattr(self, 'bench_observer', None)
+        if observer is not None:
+            observer.observe(screen, reason='deploy_phase_input')
         orbs = self.reader.orbs(screen)
         if diagnostic_enabled:
             self.diagnostics.event("orb_detection", frame_id=frame_id,
@@ -724,6 +727,9 @@ class DeployPlanner:
             raise
         if shot is not None:
             self.diagnostics.record_frame(shot, reason=reason)
+            observer = getattr(self, 'bench_observer', None)
+            if observer is not None:
+                observer.observe(shot, reason=reason)
         return shot
 
     def _record_state(self, screen, frame_id, elixir, elixir_certainty,

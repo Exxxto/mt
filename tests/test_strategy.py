@@ -253,6 +253,45 @@ class DeployPlannerExecutionTests(unittest.TestCase):
         self.assertEqual(reader.shop_frames, ["frame"] * 6)
 
     @patch("core.strategy.time.sleep")
+    def test_bench_observer_does_not_change_dry_run_purchases(self, _sleep):
+        from unittest.mock import Mock
+
+        outcomes = []
+        for observe in (False, True):
+            planner, _, _, _ = self.planner(elixir_by_frame={"frame": 3},
+                                              cards=[card("knight", 1)])
+            observer = Mock()
+            if observe:
+                planner.bench_observer = observer
+            state = RunState()
+            result = planner.play("frame", state, dry_run=True)
+            outcomes.append((result["bought"], state.copies, state.purchases))
+            if observe:
+                observer.observe.assert_called_once_with("frame", reason="deploy_phase_input")
+        self.assertEqual(outcomes[0], outcomes[1])
+
+    @patch("core.strategy.time.sleep")
+    def test_bench_observer_receives_existing_post_purchase_frame(self, _sleep):
+        from unittest.mock import Mock
+
+        initial, updated = object(), object()
+        planner, _, adb, _ = self.planner(
+            frames=[updated], elixir_by_frame={initial: 3, updated: 0},
+            cards_by_frame={initial: [card("knight", 2)], updated: [card("archer", 1)]},
+        )
+        planner.diagnostics = Mock(enabled=True)
+        planner.diagnostics.record_frame.return_value = 1
+        planner.diagnostics.frame_id.return_value = 1
+        observer = planner.bench_observer = Mock()
+        state = RunState()
+        planner.play(initial, state, max_buys=1)
+
+        self.assertEqual(state.copies, {"knight": 1})
+        self.assertEqual(adb.screenshots, 1)
+        observer.observe.assert_any_call(initial, reason="deploy_phase_input")
+        observer.observe.assert_any_call(updated, reason="after_buy")
+
+    @patch("core.strategy.time.sleep")
     def test_unknown_elixir_polls_then_returns_no_elixir(self, _sleep):
         planner, _reader, adb, _ip = self.planner(elixir_by_frame={})
 
